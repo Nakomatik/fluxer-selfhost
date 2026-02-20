@@ -64,13 +64,16 @@ services:
       - certbot_certs:/etc/letsencrypt:ro
       - certbot_webroot:/var/www/certbot:ro
     depends_on:
-      - fluxer
+      fluxer:
+        condition: service_healthy
     logging: *default-logging
 
   # ── Certbot — automatic Let's Encrypt certificate renewal ─────────────────
   certbot:
     image: certbot/certbot:latest
     container_name: fluxer_certbot
+    depends_on:
+      - nginx
     volumes:
       - certbot_certs:/etc/letsencrypt
       - certbot_webroot:/var/www/certbot

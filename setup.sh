@@ -197,9 +197,6 @@ success ".env written."
 
 # ── Write nginx.conf ──────────────────────────────────────────────────────────
 header "Writing nginx/nginx.conf…"
-sed "s/DOMAIN_PLACEHOLDER/${DOMAIN}/g" nginx/nginx.conf.template > nginx/nginx.conf 2>/dev/null || \
-  sed "s/DOMAIN_PLACEHOLDER/${DOMAIN}/g" nginx/nginx.conf > nginx/nginx.conf.tmp && mv nginx/nginx.conf.tmp nginx/nginx.conf
-# In-place replacement (nginx.conf already has DOMAIN_PLACEHOLDER)
 sed -i "s/DOMAIN_PLACEHOLDER/${DOMAIN}/g" nginx/nginx.conf
 success "nginx.conf configured for ${DOMAIN}."
 
@@ -342,6 +339,9 @@ success "Images pulled."
 header "Obtaining SSL certificate for ${DOMAIN}…"
 info "Starting nginx temporarily for ACME HTTP challenge…"
 
+# Docker prefixes volume names with the compose project name (directory name).
+PROJECT_NAME=$(basename "$(pwd)")
+
 # Start nginx in HTTP-only mode for the initial cert request.
 # nginx will fail to start with the full config (ssl cert doesn't exist yet),
 # so we start with a temporary config that only serves the ACME challenge.
@@ -363,13 +363,13 @@ docker run -d --rm \
   --name fluxer_nginx_acme \
   -p 80:80 \
   -v /tmp/nginx-acme-only.conf:/etc/nginx/nginx.conf:ro \
-  -v fluxer-selfhost_certbot_webroot:/var/www/certbot \
+  -v "${PROJECT_NAME}_certbot_webroot":/var/www/certbot \
   nginx:alpine >/dev/null
 
 info "Running certbot…"
 docker run --rm \
-  -v fluxer-selfhost_certbot_certs:/etc/letsencrypt \
-  -v fluxer-selfhost_certbot_webroot:/var/www/certbot \
+  -v "${PROJECT_NAME}_certbot_certs":/etc/letsencrypt \
+  -v "${PROJECT_NAME}_certbot_webroot":/var/www/certbot \
   certbot/certbot:latest certonly \
     --webroot \
     --webroot-path=/var/www/certbot \

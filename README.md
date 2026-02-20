@@ -250,8 +250,11 @@ To back up:
 docker compose stop fluxer
 
 # Export the data volume
+# Note: Docker names volumes using the project directory name as a prefix.
+# If you cloned into a directory other than "fluxer-selfhost", adjust accordingly.
+PROJ=$(basename $(pwd))
 docker run --rm \
-  -v fluxer-selfhost_fluxer_data:/data \
+  -v ${PROJ}_fluxer_data:/data \
   -v $(pwd):/backup \
   alpine tar czf /backup/fluxer-backup-$(date +%Y%m%d).tar.gz -C /data .
 
@@ -262,11 +265,12 @@ docker compose start fluxer
 To restore:
 
 ```bash
+PROJ=$(basename $(pwd))
 docker compose down
-docker volume rm fluxer-selfhost_fluxer_data
-docker volume create fluxer-selfhost_fluxer_data
+docker volume rm ${PROJ}_fluxer_data
+docker volume create ${PROJ}_fluxer_data
 docker run --rm \
-  -v fluxer-selfhost_fluxer_data:/data \
+  -v ${PROJ}_fluxer_data:/data \
   -v $(pwd):/backup \
   alpine tar xzf /backup/fluxer-backup-YYYYMMDD.tar.gz -C /data
 docker compose up -d
