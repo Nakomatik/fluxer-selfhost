@@ -1,0 +1,73 @@
+{
+  "$schema": "https://raw.githubusercontent.com/fluxerapp/fluxer/refs/heads/refactor/packages/config/src/ConfigSchema.json",
+
+  "env": "production",
+
+  "domain": {
+    "base_domain": "YOUR_DOMAIN",
+    "public_scheme": "https",
+    "public_port": 443
+  },
+
+  "database": {
+    "backend": "sqlite",
+    "sqlite_path": "./data/fluxer.db"
+  },
+
+  "internal": {
+    "kv": "redis://valkey:6379/0"
+  },
+
+  "services": {
+    "server": {
+      "port": 8080,
+      "host": "0.0.0.0"
+    },
+    "media_proxy": {
+      "secret_key": "REPLACE_media_proxy_secret"
+    },
+    "admin": {
+      "secret_key_base": "REPLACE_admin_secret_key_base",
+      "oauth_client_secret": "REPLACE_admin_oauth_client_secret"
+    },
+    "gateway": {
+      "admin_reload_secret": "REPLACE_gateway_admin_reload_secret",
+      "media_proxy_endpoint": "http://127.0.0.1:8080/media"
+    }
+  },
+
+  "auth": {
+    "sudo_mode_secret": "REPLACE_sudo_mode_secret",
+    "connection_initiation_secret": "REPLACE_connection_initiation_secret",
+    "vapid": {
+      "public_key": "REPLACE_VAPID_PUBLIC_KEY",
+      "private_key": "REPLACE_VAPID_PRIVATE_KEY"
+    }
+  },
+
+  "integrations": {
+    "email": {
+      "enabled": false
+    },
+
+    "search": {
+      "url": "http://meilisearch:7700",
+      "api_key": "REPLACE_MEILI_MASTER_KEY"
+    },
+
+    "voice": {
+      "enabled": false,
+      "api_key": "REPLACE_LIVEKIT_API_KEY",
+      "api_secret": "REPLACE_LIVEKIT_API_SECRET",
+      "url": "wss://YOUR_DOMAIN",
+      "webhook_url": "http://fluxer:8080/api/webhooks/livekit",
+      "default_region": {
+        "id": "default",
+        "name": "Default",
+        "emoji": "🌐",
+        "latitude": 0.0,
+        "longitude": 0.0
+      }
+    }
+  }
+}

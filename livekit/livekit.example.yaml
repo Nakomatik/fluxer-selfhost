@@ -1,0 +1,29 @@
+# LiveKit configuration for Fluxer voice/video calls.
+# setup.sh copies this to livekit/livekit.yaml and fills in the values.
+# See: https://docs.livekit.io/home/self-hosting/vm/
+
+port: 7880
+
+keys:
+  REPLACE_LIVEKIT_API_KEY: REPLACE_LIVEKIT_API_SECRET
+
+rtc:
+  tcp_port: 7881
+  # Set to your server's public IP or domain so WebRTC ICE works from outside.
+  # Leave blank to auto-detect (works on single-NIC servers).
+  node_ip: ""
+
+turn:
+  enabled: true
+  udp_port: 3478
+  # Set if your server is behind NAT and you want TURN to use a specific domain.
+  # domain: turn.YOUR_DOMAIN
+
+room:
+  auto_create: true
+  max_participants: 50
+  empty_timeout: 300
+
+logging:
+  level: info
+  json: true

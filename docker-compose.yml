@@ -1,0 +1,140 @@
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+
+  # ── Valkey (Redis-compatible cache — required) ─────────────────────────────
+  valkey:
+    image: valkey/valkey:8.0.6-alpine
+    container_name: fluxer_valkey
+    restart: unless-stopped
+    command:
+      - valkey-server
+      - --appendonly yes
+      - --save 60 1
+      - --loglevel warning
+    volumes:
+      - valkey_data:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging: *default-logging
+
+  # ── Fluxer server (required) ───────────────────────────────────────────────
+  fluxer:
+    image: ${FLUXER_IMAGE:-ghcr.io/fluxerapp/fluxer-server:stable}
+    container_name: fluxer
+    restart: unless-stopped
+    init: true
+    environment:
+      FLUXER_CONFIG: /usr/src/app/config/config.json
+      NODE_ENV: production
+    # Bind only to localhost — nginx terminates TLS and proxies inward
+    ports:
+      - "127.0.0.1:${FLUXER_PORT:-8080}:8080"
+    depends_on:
+      valkey:
+        condition: service_healthy
+    volumes:
+      - ./config/config.json:/usr/src/app/config/config.json:ro
+      - fluxer_data:/usr/src/app/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/_health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging: *default-logging
+
+  # ── Nginx reverse proxy (required — handles HTTPS) ─────────────────────────
+  nginx:
+    image: nginx:alpine
+    container_name: fluxer_nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - certbot_certs:/etc/letsencrypt:ro
+      - certbot_webroot:/var/www/certbot:ro
+    depends_on:
+      - fluxer
+    logging: *default-logging
+
+  # ── Certbot — automatic Let's Encrypt certificate renewal ─────────────────
+  certbot:
+    image: certbot/certbot:latest
+    container_name: fluxer_certbot
+    volumes:
+      - certbot_certs:/etc/letsencrypt
+      - certbot_webroot:/var/www/certbot
+    # Check for renewal every 12 hours
+    entrypoint: >
+      /bin/sh -c "trap exit TERM;
+      while :; do
+        certbot renew --webroot --webroot-path=/var/www/certbot --quiet;
+        sleep 12h & wait $${!};
+      done"
+    restart: unless-stopped
+    logging: *default-logging
+
+  # ── Meilisearch — full-text message search (optional) ─────────────────────
+  # Enable: docker compose --profile search up -d
+  meilisearch:
+    image: getmeili/meilisearch:v1.14
+    container_name: fluxer_meilisearch
+    profiles: ["search"]
+    restart: unless-stopped
+    environment:
+      MEILI_ENV: production
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:?MEILI_MASTER_KEY must be set in .env}
+      MEILI_DB_PATH: /meili_data
+      MEILI_HTTP_ADDR: "0.0.0.0:7700"
+    # Not exposed publicly — Fluxer connects to it directly on the Docker network
+    expose:
+      - "7700"
+    volumes:
+      - meilisearch_data:/meili_data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:7700/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging: *default-logging
+
+  # ── LiveKit — voice & video calls (optional) ───────────────────────────────
+  # Enable: docker compose --profile voice up -d
+  # Requires: livekit/livekit.yaml (created by setup.sh)
+  livekit:
+    image: livekit/livekit-server:v1.9.11
+    container_name: fluxer_livekit
+    profiles: ["voice"]
+    restart: unless-stopped
+    command: ["--config", "/etc/livekit/livekit.yaml"]
+    volumes:
+      - ./livekit/livekit.yaml:/etc/livekit/livekit.yaml:ro
+    ports:
+      - "7880:7880"               # HTTP / WebSocket signaling
+      - "7881:7881"               # TCP WebRTC ICE fallback
+      - "3478:3478/udp"           # STUN / TURN
+      - "50000-50100:50000-50100/udp"  # WebRTC media streams
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:7880 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    logging: *default-logging
+
+volumes:
+  valkey_data:
+  fluxer_data:
+  meilisearch_data:
+  certbot_certs:
+  certbot_webroot:
