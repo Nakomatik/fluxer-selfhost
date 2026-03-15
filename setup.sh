@@ -970,6 +970,10 @@ fi
 
 # ── Start the stack ───────────────────────────────────────────────────────────
 header "Starting Fluxer…"
+
+# Tear down any previous run first to release ports (avoids docker-proxy ghost binds)
+$COMPOSE $PROFILES down 2>/dev/null || true
+
 $COMPOSE $PROFILES up -d
 success "Fluxer is up!"
 
