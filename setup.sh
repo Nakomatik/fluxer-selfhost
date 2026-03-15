@@ -881,8 +881,11 @@ PROFILES=""
 $ENABLE_SEARCH && PROFILES="${PROFILES} --profile search"
 $ENABLE_VOICE  && PROFILES="${PROFILES} --profile voice"
 
-# --ignore-pull-failures: the fluxer-server image is local (not on a registry)
-$COMPOSE $PROFILES pull --ignore-pull-failures
+# Pull only remote images — skip 'fluxer' since it's a locally-built image
+PULL_SERVICES=$($COMPOSE $PROFILES config --services 2>/dev/null | grep -v '^fluxer$' || true)
+if [[ -n "$PULL_SERVICES" ]]; then
+  $COMPOSE $PROFILES pull $PULL_SERVICES
+fi
 success "Images pulled."
 
 # ── Obtain SSL certificate ────────────────────────────────────────────────────
