@@ -75,6 +75,19 @@ prompt_yn() {
   [[ "$ans" =~ ^[Yy] ]]
 }
 
+read_pem() {
+  # Reads a PEM block (certificate or private key) from stdin.
+  # Reads lines until -----END is encountered, then stops.
+  local label="$1" output=""
+  info "Paste your ${label} below (including the -----BEGIN and -----END lines):"
+  while IFS= read -r line; do
+    output="${output}${line}
+"
+    [[ "$line" == *"-----END"* ]] && break
+  done
+  printf '%s' "$output"
+}
+
 # ── Prerequisites ─────────────────────────────────────────────────────────────
 header "Checking prerequisites…"
 require_cmd docker  "Install Docker: https://docs.docker.com/engine/install/"
@@ -175,21 +188,43 @@ fi
 
 header "SSL certificate method"
 info "Choose how to obtain your SSL certificate:"
-echo -e "  ${BOLD}1${RESET}) HTTP-01 challenge (default — requires port 80 reachable, no CDN proxy)"
-echo -e "  ${BOLD}2${RESET}) Cloudflare DNS-01 challenge (domain is behind Cloudflare proxy)"
-echo -e "  ${BOLD}3${RESET}) Skip — I already have certificates or will set them up manually"
+echo -e "  ${BOLD}1${RESET}) HTTP-01 challenge (default — port 80 reachable, no CDN proxy)"
+echo -e "  ${BOLD}2${RESET}) Cloudflare Origin Certificate (paste cert + key — easiest for Cloudflare)"
+echo -e "  ${BOLD}3${RESET}) Cloudflare DNS-01 challenge (automated, needs API token)"
+echo -e "  ${BOLD}4${RESET}) Skip — I already have certificates or will set them up manually"
 
 SSL_METHOD="${CACHED_SSL_METHOD:-1}"
-prompt SSL_METHOD "SSL method [1/2/3]" "$SSL_METHOD"
-# Normalize to 1/2/3
+prompt SSL_METHOD "SSL method [1/2/3/4]" "$SSL_METHOD"
+# Normalize
 case "$SSL_METHOD" in
-  2|cloudflare|cf|dns) SSL_METHOD=2 ;;
-  3|skip|manual|none)  SSL_METHOD=3 ;;
-  *)                   SSL_METHOD=1 ;;
+  2|origin|cf|cloudflare) SSL_METHOD=2 ;;
+  3|dns|dns-01)           SSL_METHOD=3 ;;
+  4|skip|manual|none)     SSL_METHOD=4 ;;
+  *)                      SSL_METHOD=1 ;;
 esac
 
 CF_API_TOKEN=""
+SSL_CERT_PEM=""
+SSL_KEY_PEM=""
+
 if [[ "$SSL_METHOD" == "2" ]]; then
+  echo ""
+  info "Go to Cloudflare Dashboard → your domain → SSL/TLS → Origin Server → Create Certificate"
+  info "Keep defaults (RSA, 15 years), click Create, then paste both values below."
+  echo ""
+  SSL_CERT_PEM=$(read_pem "Origin Certificate")
+  echo ""
+  SSL_KEY_PEM=$(read_pem "Private Key")
+  echo ""
+  if [[ -z "$SSL_CERT_PEM" || -z "$SSL_KEY_PEM" ]]; then
+    error "Certificate or private key is empty. Cannot continue."
+    exit 1
+  fi
+  success "Certificate and key received."
+  info "Remember to set Cloudflare SSL/TLS mode to 'Full (strict)' after setup."
+fi
+
+if [[ "$SSL_METHOD" == "3" ]]; then
   info "You need a Cloudflare API token with Zone:DNS:Edit permission."
   info "Create one at: https://dash.cloudflare.com/profile/api-tokens"
   prompt CF_API_TOKEN "Cloudflare API token" "${CACHED_CF_API_TOKEN}"
@@ -390,18 +425,19 @@ else
   info "FLUXER_CONFIG already set in Dockerfile — skipping."
 fi
 
-# ·· Gotcha #4: Fix CDN endpoint fallback in rspack.config.mjs ···············
-# JavaScript || treats "" as falsy, so FLUXER_CDN_ENDPOINT="" still falls
-# through to the fluxerstatic.com CDN. Must use 'in' operator.
-info "Fixing CDN endpoint fallback (Gotcha #4)…"
+# ·· Gotcha #4: Hardcode empty CDN endpoint in rspack.config.mjs ·············
+# For self-hosting, all assets must be served from the same origin.
+# We replace every reference to fluxerstatic.com with '' so rspack sets
+# publicPath to "" (relative), regardless of ENV vars or Docker cache.
+info "Hardcoding empty CDN endpoint for self-hosted build (Gotcha #4)…"
 
 RSPACK_CFG="fluxer-src/fluxer_app/rspack.config.mjs"
 if [[ -f "$RSPACK_CFG" ]]; then
-  if grep -q "process\.env\.FLUXER_CDN_ENDPOINT || " "$RSPACK_CFG"; then
-    sed -i "s|process\.env\.FLUXER_CDN_ENDPOINT || 'https://fluxerstatic\.com'|'FLUXER_CDN_ENDPOINT' in process.env ? process.env.FLUXER_CDN_ENDPOINT : 'https://fluxerstatic.com'|" "$RSPACK_CFG"
-    success "CDN endpoint fallback fixed."
+  if grep -q 'fluxerstatic\.com' "$RSPACK_CFG"; then
+    sed -i "s|'https://fluxerstatic\.com'|''|g" "$RSPACK_CFG"
+    success "All fluxerstatic.com CDN references replaced with '' in rspack config."
   else
-    info "CDN endpoint already uses 'in' operator — skipping."
+    info "No fluxerstatic.com references in rspack config — already clean."
   fi
 else
   warn "rspack.config.mjs not found — skipping CDN fix."
@@ -803,7 +839,8 @@ fi
 header "Writing docker-compose.override.yml (NATS services)…"
 
 # Build the certbot renewal override based on SSL method
-if [[ "$SSL_METHOD" == "2" ]]; then
+if [[ "$SSL_METHOD" == "3" ]]; then
+  # DNS-01: override certbot to use Cloudflare plugin for renewal
   CERTBOT_OVERRIDE=$(cat <<'CBEOF'
 
   certbot:
@@ -818,6 +855,16 @@ if [[ "$SSL_METHOD" == "2" ]]; then
         certbot renew --dns-cloudflare --dns-cloudflare-credentials /etc/cloudflare.ini --quiet;
         sleep 12h & wait $${!};
       done"
+CBEOF
+)
+elif [[ "$SSL_METHOD" == "2" || "$SSL_METHOD" == "4" ]]; then
+  # Origin cert (15yr, no renewal needed) or manual: disable certbot
+  CERTBOT_OVERRIDE=$(cat <<'CBEOF'
+
+  certbot:
+    image: alpine:latest
+    entrypoint: ["sh", "-c", "echo 'Certbot disabled (Origin Certificate or manual SSL)'; exit 0"]
+    restart: "no"
 CBEOF
 )
 else
@@ -938,7 +985,28 @@ NGINXEOF
   success "SSL certificate obtained."
 
 elif [[ "$SSL_METHOD" == "2" ]]; then
-  # ·· Method 2: Cloudflare DNS-01 challenge ···································
+  # ·· Method 2: Cloudflare Origin Certificate (pasted during setup) ···········
+  header "Installing Cloudflare Origin Certificate for ${DOMAIN}…"
+
+  # Write cert and key into the certbot_certs Docker volume in the path nginx expects
+  docker run --rm \
+    -v "${PROJECT_NAME}_certbot_certs":/etc/letsencrypt \
+    alpine sh -c "mkdir -p /etc/letsencrypt/live/${DOMAIN}"
+
+  # Write certificate
+  printf '%s' "$SSL_CERT_PEM" | docker run --rm -i \
+    -v "${PROJECT_NAME}_certbot_certs":/etc/letsencrypt \
+    alpine sh -c "cat > /etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
+
+  # Write private key
+  printf '%s' "$SSL_KEY_PEM" | docker run --rm -i \
+    -v "${PROJECT_NAME}_certbot_certs":/etc/letsencrypt \
+    alpine sh -c "cat > /etc/letsencrypt/live/${DOMAIN}/privkey.pem"
+
+  success "Origin certificate installed into certbot_certs volume."
+
+elif [[ "$SSL_METHOD" == "3" ]]; then
+  # ·· Method 3: Cloudflare DNS-01 challenge ···································
   header "Obtaining SSL certificate for ${DOMAIN} (Cloudflare DNS-01)…"
 
   mkdir -p certbot
@@ -962,8 +1030,8 @@ CFEOF
 
   success "SSL certificate obtained via Cloudflare DNS."
 
-elif [[ "$SSL_METHOD" == "3" ]]; then
-  # ·· Method 3: Manual / skip ·················································
+elif [[ "$SSL_METHOD" == "4" ]]; then
+  # ·· Method 4: Manual / skip ·················································
   header "Skipping automatic SSL certificate…"
   warn "You must place your certificate files so they are accessible at:"
   warn "  /etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
