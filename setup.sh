@@ -599,6 +599,28 @@ else
   warn "User.tsx not found — skipping unclaimed account fix."
 fi
 
+# ·· Gotcha #21: BlueskyOAuthService crashes /.well-known/fluxer ···············
+# The Bluesky AT Protocol OAuth client requires a JWK signing key with a "kid"
+# property for private_key_jwt authentication. Without it, the NodeOAuthClient
+# constructor throws, crashing the /.well-known/fluxer endpoint (500) and
+# making the entire app unusable. Self-hosted instances don't need Bluesky
+# federation, so we short-circuit the create() method to return null.
+info "Disabling BlueskyOAuthService (no signing keys for self-host) (Gotcha #21)…"
+
+BSKY_SVC="fluxer-src/packages/api/src/bluesky/BlueskyOAuthService.tsx"
+if [[ -f "$BSKY_SVC" ]]; then
+  if ! grep -q 'SELF_HOST_PATCH' "$BSKY_SVC"; then
+    # Insert "return null as any;" right before "new NodeOAuthClient" to
+    # short-circuit before the constructor validates signing keys.
+    sed -i '/new NodeOAuthClient/i\      return null as any; // SELF_HOST_PATCH: skip Bluesky OAuth (no signing keys for self-hosted)' "$BSKY_SVC"
+    success "BlueskyOAuthService.create() short-circuited."
+  else
+    info "BlueskyOAuthService already patched — skipping."
+  fi
+else
+  warn "BlueskyOAuthService.tsx not found — skipping."
+fi
+
 # ·· Skip typecheck — upstream type errors break the build ·····················
 # GatewayService.tsx has TS2559 that blocks `pnpm typecheck`.
 # Rather than patching each type error, skip the step entirely.
@@ -700,7 +722,7 @@ if $ENABLE_VOICE; then
       "enabled": true,
       "api_key": "${LIVEKIT_KEY}",
       "api_secret": "${LIVEKIT_SECRET}",
-      "url": "wss://${DOMAIN}",
+      "url": "wss://${DOMAIN}/livekit",
       "webhook_url": "http://fluxer:8080/api/webhooks/livekit",
       "default_region": {
         "id": "default",
@@ -1063,6 +1085,17 @@ for port in 80 443; do
     fi
   fi
 done
+
+# Open firewall ports for LiveKit media transport (voice/video)
+if $ENABLE_VOICE; then
+  if command -v ufw &>/dev/null; then
+    header "Opening firewall ports for LiveKit…"
+    ufw allow 7881/tcp  comment 'Fluxer LiveKit ICE TCP' 2>/dev/null || true
+    ufw allow 3478/udp  comment 'Fluxer LiveKit TURN/STUN' 2>/dev/null || true
+    ufw allow 50000:50100/udp comment 'Fluxer LiveKit RTP media' 2>/dev/null || true
+    success "Firewall ports opened for voice/video."
+  fi
+fi
 
 $COMPOSE $PROFILES up -d
 success "Fluxer is up!"
