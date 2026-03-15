@@ -1079,9 +1079,34 @@ echo -e "  Stop:               ${CYAN}${COMPOSE} down${RESET}"
 echo -e "  Rebuild image:      ${CYAN}docker build -t fluxer-server:local -f fluxer-src/fluxer_server/Dockerfile fluxer-src/${RESET}"
 echo -e "  Check health:       ${CYAN}curl -s https://${DOMAIN}/_health | jq${RESET}"
 echo ""
+
+# ── Post-setup warnings ──────────────────────────────────────────────────────
+if $ENABLE_VOICE; then
+  header "Firewall: open LiveKit ports for voice/video"
+  info "Voice/video requires these ports open on your server:"
+  echo -e "  ${CYAN}sudo ufw allow 7881/tcp${RESET}   # LiveKit ICE TCP fallback"
+  echo -e "  ${CYAN}sudo ufw allow 3478/udp${RESET}   # TURN/STUN"
+  echo -e "  ${CYAN}sudo ufw allow 50000:50100/udp${RESET}  # RTP media streams"
+  echo ""
+fi
+
+if [[ "$SSL_METHOD" == "2" || "$SSL_METHOD" == "3" ]]; then
+  header "Cloudflare settings to verify"
+  info "These Cloudflare settings can silently break the app if left on:"
+  echo -e "  1. ${BOLD}SSL/TLS${RESET} → set to ${BOLD}Full (strict)${RESET} (Origin Certificate)"
+  echo -e "  2. ${BOLD}Speed > Auto Minify${RESET} → ${BOLD}OFF${RESET} for JavaScript (breaks hashed asset filenames)"
+  echo -e "  3. ${BOLD}Speed > Rocket Loader${RESET} → ${BOLD}OFF${RESET} (injects scripts that conflict with CSP nonces)"
+  echo -e "  4. ${BOLD}Scrape Shield > Email Address Obfuscation${RESET} → ${BOLD}OFF${RESET} (injects inline scripts)"
+  echo ""
+fi
+
 if [[ "$VAPID_PUBLIC" == "REPLACE_VAPID_PUBLIC_KEY" ]]; then
   warn "VAPID keys were not generated (Node.js not found)."
   warn "Web push notifications won't work until you add them."
   warn "See README.md → 'Adding VAPID keys later' for instructions."
   echo ""
 fi
+
+info "First user to register gets admin access automatically."
+info "Admin panel: https://${DOMAIN}/admin"
+echo ""
