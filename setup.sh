@@ -645,6 +645,24 @@ else
   warn "User.tsx not found — skipping unclaimed account fix."
 fi
 
+# ·· Gotcha #22: wasm-opt crashes with SIGSEGV ·································
+# wasm-opt (the WebAssembly optimizer) segfaults on some platforms (low memory,
+# certain CPU architectures). The WASM binary works fine without optimization.
+# Disable wasm-opt in the libfluxcore Cargo.toml.
+info "Disabling wasm-opt to prevent SIGSEGV during build (Gotcha #22)…"
+
+LIBFLUXCORE_TOML="fluxer-src/fluxer_app/crates/libfluxcore/Cargo.toml"
+if [[ -f "$LIBFLUXCORE_TOML" ]]; then
+  if ! grep -q 'wasm-opt' "$LIBFLUXCORE_TOML"; then
+    printf '\n[package.metadata.wasm-pack.profile.release]\nwasm-opt = false\n' >> "$LIBFLUXCORE_TOML"
+    success "wasm-opt disabled in libfluxcore Cargo.toml."
+  else
+    info "wasm-opt already configured — skipping."
+  fi
+else
+  warn "libfluxcore Cargo.toml not found — skipping."
+fi
+
 # ·· Gotcha #21: BlueskyOAuthService crashes /.well-known/fluxer ···············
 # The Bluesky AT Protocol OAuth client requires a JWK signing key with a "kid"
 # property for private_key_jwt authentication. Without it, the NodeOAuthClient
