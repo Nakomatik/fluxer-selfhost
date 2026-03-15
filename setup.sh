@@ -918,6 +918,9 @@ NGINXEOF
     -v "${PROJECT_NAME}_certbot_webroot":/var/www/certbot \
     nginx:alpine >/dev/null
 
+  # Ensure the temp nginx is always cleaned up, even if certbot fails
+  trap 'docker stop fluxer_nginx_acme >/dev/null 2>&1 || true' EXIT
+
   info "Running certbot…"
   docker run --rm \
     -v "${PROJECT_NAME}_certbot_certs":/etc/letsencrypt \
@@ -931,6 +934,7 @@ NGINXEOF
       -d "${DOMAIN}"
 
   docker stop fluxer_nginx_acme >/dev/null 2>&1 || true
+  trap - EXIT
   success "SSL certificate obtained."
 
 elif [[ "$SSL_METHOD" == "2" ]]; then
@@ -972,7 +976,25 @@ fi
 header "Starting Fluxer…"
 
 # Tear down any previous run first to release ports (avoids docker-proxy ghost binds)
-$COMPOSE $PROFILES down 2>/dev/null || true
+$COMPOSE $PROFILES down --remove-orphans 2>/dev/null || true
+
+# Kill orphaned standalone containers from previous setup attempts (e.g. HTTP-01 acme nginx)
+docker stop fluxer_nginx_acme 2>/dev/null || true
+docker rm   fluxer_nginx_acme 2>/dev/null || true
+
+# Verify ports 80/443 are free before starting
+for port in 80 443; do
+  if ss -tlnH "sport = :${port}" 2>/dev/null | grep -q .; then
+    warn "Port ${port} is still in use. Attempting to free it…"
+    # Find and kill the docker-proxy holding the port
+    PID=$(ss -tlnpH "sport = :${port}" 2>/dev/null | grep -oP 'pid=\K[0-9]+' | head -1)
+    if [[ -n "$PID" ]]; then
+      info "Killing process ${PID} on port ${port}…"
+      kill "$PID" 2>/dev/null || true
+      sleep 1
+    fi
+  fi
+done
 
 $COMPOSE $PROFILES up -d
 success "Fluxer is up!"
