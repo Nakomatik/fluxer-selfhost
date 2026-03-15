@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
 # Fluxer Self-Host Setup
-# Generates config files, obtains an SSL certificate, and starts the server.
+# Generates config files, builds the server from source, obtains an SSL
+# certificate, and starts the server.
 # Run once on a fresh machine: bash setup.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
@@ -78,6 +79,7 @@ prompt_yn() {
 header "Checking prerequisites…"
 require_cmd docker  "Install Docker: https://docs.docker.com/engine/install/"
 require_cmd openssl "Install openssl (usually: apt install openssl)"
+require_cmd git     "Install git (usually: apt install git)"
 
 # docker compose v2 (plugin) or v1 (standalone)
 if docker compose version &>/dev/null 2>&1; then
@@ -89,7 +91,7 @@ else
   exit 1
 fi
 
-success "Docker and Docker Compose found."
+success "Docker, Docker Compose, and git found."
 
 # ── Re-run guard ──────────────────────────────────────────────────────────────
 if [[ -f .env && -f config/config.json ]]; then
@@ -174,6 +176,38 @@ fi
 
 success "All secrets generated."
 
+# ── Clone & build Fluxer from source ─────────────────────────────────────────
+# Gotcha #10: The GHCR image (ghcr.io/fluxerapp/fluxer-server:stable) is
+# private and requires authentication. We must build from source instead.
+header "Building Fluxer server image from source…"
+warn "The GHCR image is private — building locally from source."
+
+if [[ -d fluxer-src ]]; then
+  info "fluxer-src/ already exists — skipping clone."
+else
+  info "Cloning https://github.com/fluxerapp/fluxer.git into fluxer-src/…"
+  git clone https://github.com/fluxerapp/fluxer.git fluxer-src
+fi
+
+info "Checking out the refactor branch…"
+git -C fluxer-src checkout refactor
+git -C fluxer-src pull --ff-only 2>/dev/null || true
+
+echo ""
+warn "Building Docker image — this takes 20–30 minutes on first run."
+info "Subsequent builds with cached layers are much faster."
+echo ""
+
+docker build \
+  -t fluxer-server:local \
+  --build-arg BASE_DOMAIN="${DOMAIN}" \
+  --build-arg FLUXER_CDN_ENDPOINT="" \
+  --build-arg INCLUDE_NSFW_ML=true \
+  -f fluxer-src/fluxer_server/Dockerfile \
+  fluxer-src/
+
+success "Docker image fluxer-server:local built successfully."
+
 # ── Write .env ────────────────────────────────────────────────────────────────
 header "Writing .env…"
 
@@ -184,7 +218,8 @@ cat > .env <<EOF
 DOMAIN=${DOMAIN}
 LETSENCRYPT_EMAIL=${LE_EMAIL}
 
-FLUXER_IMAGE=ghcr.io/fluxerapp/fluxer-server:stable
+# Local build — GHCR image is private (Gotcha #10)
+FLUXER_IMAGE=fluxer-server:local
 FLUXER_PORT=8080
 
 MEILI_MASTER_KEY=${MEILI_KEY}
@@ -193,6 +228,7 @@ LIVEKIT_API_KEY=${LIVEKIT_KEY}
 LIVEKIT_API_SECRET=${LIVEKIT_SECRET}
 EOF
 
+chmod 600 .env
 success ".env written."
 
 # ── Write nginx.conf ──────────────────────────────────────────────────────────
@@ -202,6 +238,8 @@ success "nginx.conf configured for ${DOMAIN}."
 
 # ── Build config.json ─────────────────────────────────────────────────────────
 header "Writing config/config.json…"
+
+mkdir -p config
 
 # Build the email integration block
 if $ENABLE_EMAIL; then
@@ -228,6 +266,7 @@ fi
 if $ENABLE_SEARCH; then
   SEARCH_BLOCK=$(cat <<SJSON
     "search": {
+      "engine": "meilisearch",
       "url": "http://meilisearch:7700",
       "api_key": "${MEILI_KEY}"
     }
@@ -249,7 +288,7 @@ if $ENABLE_VOICE; then
       "default_region": {
         "id": "default",
         "name": "Default",
-        "emoji": "\ud83c\udf10",
+        "emoji": "🌐",
         "latitude": 0.0,
         "longitude": 0.0
       }
@@ -272,17 +311,30 @@ cat > config/config.json <<EOF
 
   "database": {
     "backend": "sqlite",
-    "sqlite_path": "./data/fluxer.db"
+    "sqlite_path": "/usr/src/app/data/fluxer.db"
   },
 
   "internal": {
-    "kv": "redis://valkey:6379/0"
+    "kv": "redis://valkey:6379/0",
+    "kv_mode": "standalone"
+  },
+
+  "s3": {
+    "access_key_id": "fluxer-local",
+    "secret_access_key": "fluxer-local-secret",
+    "endpoint": "http://127.0.0.1:8080/s3"
+  },
+
+  "instance": {
+    "self_hosted": true,
+    "deployment_mode": "monolith"
   },
 
   "services": {
     "server": {
       "port": 8080,
-      "host": "0.0.0.0"
+      "host": "0.0.0.0",
+      "static_dir": "/usr/src/app/assets"
     },
     "media_proxy": {
       "secret_key": "${SECRET_MEDIA_PROXY}"
@@ -292,8 +344,14 @@ cat > config/config.json <<EOF
       "oauth_client_secret": "${SECRET_ADMIN_OAUTH}"
     },
     "gateway": {
+      "port": 8082,
       "admin_reload_secret": "${SECRET_GATEWAY}",
       "media_proxy_endpoint": "http://127.0.0.1:8080/media"
+    },
+    "nats": {
+      "core_url": "nats://nats-core:4222",
+      "jetstream_url": "nats://nats-jetstream:4223",
+      "auth_token": ""
     }
   },
 
@@ -314,17 +372,104 @@ ${VOICE_BLOCK}
 }
 EOF
 
+chmod 600 config/config.json
 success "config/config.json written."
 
 # ── Write livekit.yaml ────────────────────────────────────────────────────────
 if $ENABLE_VOICE; then
   header "Writing livekit/livekit.yaml…"
-  sed \
-    -e "s/REPLACE_LIVEKIT_API_KEY/${LIVEKIT_KEY}/g" \
-    -e "s/REPLACE_LIVEKIT_API_SECRET/${LIVEKIT_SECRET}/g" \
-    livekit/livekit.example.yaml > livekit/livekit.yaml
+
+  # Generated directly rather than sed-replacing the example, so we can include
+  # the webhook section (Gotcha #6) and RTC port range.
+  cat > livekit/livekit.yaml <<LKEOF
+port: 7880
+
+keys:
+  ${LIVEKIT_KEY}: ${LIVEKIT_SECRET}
+
+rtc:
+  tcp_port: 7881
+  port_range_start: 50000
+  port_range_end: 50100
+  use_external_ip: true
+  node_ip: ""
+
+turn:
+  enabled: true
+  udp_port: 3478
+
+room:
+  auto_create: true
+  max_participants: 50
+  empty_timeout: 300
+
+# Gotcha #6: api_key is required for webhooks — without it LiveKit restart-loops
+webhook:
+  api_key: ${LIVEKIT_KEY}
+  urls:
+    - "http://fluxer:8080/api/webhooks/livekit"
+
+logging:
+  level: info
+  json: true
+LKEOF
+
   success "livekit/livekit.yaml written."
 fi
+
+# ── Write docker-compose.override.yml for NATS (Gotcha #7) ───────────────────
+# NATS is a hard dependency — the server crashes with CONNECTION_REFUSED without it.
+header "Writing docker-compose.override.yml (NATS services)…"
+
+cat > docker-compose.override.yml <<'DEOF'
+# Generated by setup.sh — NATS services required by Fluxer (Gotcha #7).
+# The server uses NATS JetStream for its job queue and background processing.
+# Without these containers the server fatally crashes on startup.
+
+services:
+  nats-core:
+    image: nats:2-alpine
+    container_name: fluxer_nats_core
+    restart: unless-stopped
+    command: ["--port", "4222"]
+    expose:
+      - "4222"
+    healthcheck:
+      test: ["CMD", "nats-server", "--signal", "ldm"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  nats-jetstream:
+    image: nats:2-alpine
+    container_name: fluxer_nats_jetstream
+    restart: unless-stopped
+    command: ["--port", "4223", "--jetstream", "--store_dir", "/data"]
+    expose:
+      - "4223"
+    volumes:
+      - nats_jetstream_data:/data
+    healthcheck:
+      test: ["CMD", "nats-server", "--signal", "ldm"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+volumes:
+  nats_jetstream_data:
+DEOF
+
+success "docker-compose.override.yml written."
 
 # ── Pull Docker images ────────────────────────────────────────────────────────
 header "Pulling Docker images…"
@@ -332,7 +477,8 @@ PROFILES=""
 $ENABLE_SEARCH && PROFILES="${PROFILES} --profile search"
 $ENABLE_VOICE  && PROFILES="${PROFILES} --profile voice"
 
-$COMPOSE $PROFILES pull
+# --ignore-pull-failures: the fluxer-server image is local (not on a registry)
+$COMPOSE $PROFILES pull --ignore-pull-failures
 success "Images pulled."
 
 # ── Obtain SSL certificate ────────────────────────────────────────────────────
@@ -395,8 +541,8 @@ echo ""
 echo -e "  ${BOLD}Useful commands:${RESET}"
 echo -e "  View logs:          ${CYAN}${COMPOSE} logs -f${RESET}"
 echo -e "  Stop:               ${CYAN}${COMPOSE} down${RESET}"
-echo -e "  Update:             ${CYAN}${COMPOSE} pull && ${COMPOSE} up -d${RESET}"
-echo -e "  Check health:       ${CYAN}${COMPOSE} ps${RESET}"
+echo -e "  Rebuild image:      ${CYAN}docker build -t fluxer-server:local -f fluxer-src/fluxer_server/Dockerfile fluxer-src/${RESET}"
+echo -e "  Check health:       ${CYAN}curl -s https://${DOMAIN}/_health | jq${RESET}"
 echo ""
 if [[ "$VAPID_PUBLIC" == "REPLACE_VAPID_PUBLIC_KEY" ]]; then
   warn "VAPID keys were not generated (Node.js not found)."
