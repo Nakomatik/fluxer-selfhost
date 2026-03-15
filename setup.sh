@@ -191,8 +191,303 @@ fi
 
 info "Checking out the refactor branch…"
 git -C fluxer-src checkout refactor
+# Reset to clean upstream so patches apply cleanly on re-runs
+git -C fluxer-src reset --hard origin/refactor 2>/dev/null || true
 git -C fluxer-src pull --ff-only 2>/dev/null || true
 
+# ── Patch source tree for self-hosted build ──────────────────────────────────
+# The upstream source requires several fixes before it will build and run
+# correctly in a self-hosted monolith configuration. Each fix references a
+# numbered gotcha from DEPLOYMENT.md.
+header "Patching source tree for self-hosted build…"
+
+DOCKERFILE="fluxer-src/fluxer_server/Dockerfile"
+DOCKERIGNORE="fluxer-src/.dockerignore"
+
+# ·· Gotcha #8: Regenerate Dockerfile package COPY list ······················
+# The Dockerfile COPY list references packages/app/ which doesn't exist and
+# may be missing newer packages. Rebuild it from the actual directory listing.
+info "Fixing Dockerfile package COPY list (Gotcha #8)…"
+
+PKG_COPIES=""
+for dir in fluxer-src/packages/*/; do
+  pkg=$(basename "$dir")
+  if [[ -f "${dir}package.json" ]]; then
+    PKG_COPIES="${PKG_COPIES}    COPY packages/${pkg}/package.json ./packages/${pkg}/\n"
+  fi
+done
+
+awk -v copies="$PKG_COPIES" '
+  /^[[:space:]]*COPY packages\/[^\/]+\/package\.json/ {
+    if (!done) { printf "%s", copies; done=1 }
+    next
+  }
+  { print }
+' "$DOCKERFILE" > "${DOCKERFILE}.tmp" && mv "${DOCKERFILE}.tmp" "$DOCKERFILE"
+
+success "Dockerfile package list updated ($(echo -e "$PKG_COPIES" | grep -c COPY) packages)."
+
+# ·· Gotcha #1: Add Rust/WASM toolchain to app-build stage ···················
+# The fluxer_app frontend compiles Rust to WebAssembly via wasm-pack.
+# The slim Debian base lacks ca-certificates, so curl/rustup would fail.
+info "Adding Rust/WASM build toolchain (Gotcha #1)…"
+
+if ! grep -q 'rustup' "$DOCKERFILE"; then
+  cat > /tmp/_fluxer_patch_rust.txt <<'RUSTBLOCK'
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.93.0 --target wasm32-unknown-unknown
+ENV PATH="/root/.cargo/bin:${PATH}"
+RUN cargo install wasm-pack
+RUSTBLOCK
+
+  awk '
+    /^FROM deps AS app-build/ {
+      print
+      while ((getline line < "/tmp/_fluxer_patch_rust.txt") > 0) print line
+      next
+    }
+    { print }
+  ' "$DOCKERFILE" > "${DOCKERFILE}.tmp" && mv "${DOCKERFILE}.tmp" "$DOCKERFILE"
+  rm -f /tmp/_fluxer_patch_rust.txt
+  success "Rust/WASM toolchain added to app-build stage."
+else
+  info "Rust toolchain already present — skipping."
+fi
+
+# ·· Gotcha #2: Fix .dockerignore ············································
+# The .dockerignore excludes locale files, emojis.json, and build scripts
+# that are needed at build time.
+info "Fixing .dockerignore exclusions (Gotcha #2)…"
+
+if [[ -f "$DOCKERIGNORE" ]]; then
+  # Comment out exclusions that break the TypeScript build
+  sed -i 's|^/fluxer_app/src/data/emojis\.json|# &|' "$DOCKERIGNORE"
+  sed -i 's|^/fluxer_app/src/locales/\*/messages\.js|# &|' "$DOCKERIGNORE"
+
+  # Add exceptions for build scripts caught by the **/build glob
+  if ! grep -q '!fluxer_app/scripts/build' "$DOCKERIGNORE"; then
+    printf '\n# Exceptions for build scripts (Gotcha #2)\n!fluxer_app/scripts/build\n!fluxer_app/scripts/build/**\n' >> "$DOCKERIGNORE"
+  fi
+  success ".dockerignore patched."
+else
+  warn ".dockerignore not found — skipping."
+fi
+
+# ·· Gotcha #3 + #12: Build config, domain substitution, Lingui ··············
+# rspack reads FLUXER_CONFIG to derive API endpoint URLs for the frontend
+# bundle. BASE_DOMAIN replaces the template's placeholder with your domain.
+# Lingui locale files must be compiled before the frontend build.
+info "Adding build config and Lingui compilation (Gotcha #3)…"
+
+if ! grep -q 'FLUXER_CONFIG' "$DOCKERFILE"; then
+  cat > /tmp/_fluxer_patch_config.txt <<'CFGBLOCK'
+COPY config/config.production.template.json /tmp/fluxer-build-config.json
+
+ARG BASE_DOMAIN="chat.example.com"
+RUN sed -i "s/chat\.example\.com/${BASE_DOMAIN}/g" /tmp/fluxer-build-config.json
+
+ARG FLUXER_CDN_ENDPOINT=""
+ENV FLUXER_CONFIG=/tmp/fluxer-build-config.json
+ENV FLUXER_CDN_ENDPOINT=${FLUXER_CDN_ENDPOINT}
+CFGBLOCK
+
+  # Insert config block before the fluxer_app build step and add lingui:compile
+  awk '
+    /fluxer_app/ && /pnpm build/ && !cfg_done {
+      while ((getline line < "/tmp/_fluxer_patch_config.txt") > 0) print line
+      cfg_done = 1
+      sub(/pnpm build/, "pnpm lingui:compile \\&\\& pnpm build")
+    }
+    { print }
+  ' "$DOCKERFILE" > "${DOCKERFILE}.tmp" && mv "${DOCKERFILE}.tmp" "$DOCKERFILE"
+  rm -f /tmp/_fluxer_patch_config.txt
+  success "Build config and Lingui step added."
+else
+  info "FLUXER_CONFIG already set in Dockerfile — skipping."
+fi
+
+# ·· Gotcha #4: Fix CDN endpoint fallback in rspack.config.mjs ···············
+# JavaScript || treats "" as falsy, so FLUXER_CDN_ENDPOINT="" still falls
+# through to the fluxerstatic.com CDN. Must use 'in' operator.
+info "Fixing CDN endpoint fallback (Gotcha #4)…"
+
+RSPACK_CFG="fluxer-src/fluxer_app/rspack.config.mjs"
+if [[ -f "$RSPACK_CFG" ]]; then
+  if grep -q "process\.env\.FLUXER_CDN_ENDPOINT || " "$RSPACK_CFG"; then
+    sed -i "s|process\.env\.FLUXER_CDN_ENDPOINT || 'https://fluxerstatic\.com'|'FLUXER_CDN_ENDPOINT' in process.env ? process.env.FLUXER_CDN_ENDPOINT : 'https://fluxerstatic.com'|" "$RSPACK_CFG"
+    success "CDN endpoint fallback fixed."
+  else
+    info "CDN endpoint already uses 'in' operator — skipping."
+  fi
+else
+  warn "rspack.config.mjs not found — skipping CDN fix."
+fi
+
+# ·· Gotcha #9: Fix ENTRYPOINT ···············································
+# The root workspace has no "start" script. Must target fluxer_server.
+info "Fixing ENTRYPOINT (Gotcha #9)…"
+
+if grep -q 'ENTRYPOINT \["pnpm", "start"\]' "$DOCKERFILE"; then
+  sed -i 's|ENTRYPOINT \["pnpm", "start"\]|ENTRYPOINT ["pnpm", "--filter", "fluxer_server", "start"]|' "$DOCKERFILE"
+  success "ENTRYPOINT fixed."
+else
+  info "ENTRYPOINT already correct — skipping."
+fi
+
+# ·· Gotcha #15: Add admin panel CSS build ····································
+# The admin panel needs its CSS built separately or it loads unstyled.
+info "Adding admin panel CSS build (Gotcha #15)…"
+
+if ! grep -q '@fluxer/admin.*build:css' "$DOCKERFILE"; then
+  # Insert after any marketing CSS build line, or before ENTRYPOINT as fallback
+  if grep -q 'marketing.*build:css\|build:css.*marketing' "$DOCKERFILE"; then
+    sed -i '/marketing.*build:css\|build:css.*marketing/a\RUN pnpm --filter @fluxer/admin build:css' "$DOCKERFILE"
+  else
+    sed -i '/^ENTRYPOINT/i\RUN pnpm --filter @fluxer/admin build:css\n' "$DOCKERFILE"
+  fi
+  success "Admin CSS build step added."
+else
+  info "Admin CSS build already present — skipping."
+fi
+
+# ·· Gotcha #11: Fix CSP for fluxerstatic.com ································
+# The HTML template loads fonts/icons from fluxerstatic.com but the monolith
+# server's CSP only allows 'self', blocking them.
+info "Fixing Content-Security-Policy for fluxerstatic.com (Gotcha #11)…"
+
+CSP_FILE="fluxer-src/fluxer_server/src/ServiceInitializer.tsx"
+if [[ -f "$CSP_FILE" ]]; then
+  if ! grep -q 'fluxerstatic\.com' "$CSP_FILE"; then
+    # Add https://fluxerstatic.com to styleSrc, imgSrc, fontSrc arrays
+    awk '
+      /styleSrc:/ && !/fluxerstatic/ {
+        sub(/\]/, ", '"'"'https://fluxerstatic.com'"'"']")
+      }
+      /imgSrc:/ && !/fluxerstatic/ {
+        sub(/\]/, ", '"'"'https://fluxerstatic.com'"'"']")
+      }
+      /fontSrc:/ && !/fluxerstatic/ {
+        sub(/\]/, ", '"'"'https://fluxerstatic.com'"'"']")
+      }
+      { print }
+    ' "$CSP_FILE" > "${CSP_FILE}.tmp" && mv "${CSP_FILE}.tmp" "$CSP_FILE"
+    success "CSP updated for fluxerstatic.com."
+  else
+    info "CSP already includes fluxerstatic.com — skipping."
+  fi
+else
+  warn "ServiceInitializer.tsx not found — skipping CSP fix."
+fi
+
+# ·· Gotcha #16: SSO callback route not in standalone route list ··············
+# Without this, unauthenticated SSO users get redirected back to /login.
+info "Adding SSO callback to standalone routes (Gotcha #16)…"
+
+SSO_ROOT="fluxer-src/fluxer_app/src/router/components/RootComponent.tsx"
+if [[ -f "$SSO_ROOT" ]]; then
+  if ! grep -q "auth/sso" "$SSO_ROOT"; then
+    sed -i "/Routes\.CONNECTION_CALLBACK/a\\            pathname.startsWith('/auth/sso/') ||" "$SSO_ROOT"
+    success "SSO callback route added."
+  else
+    info "SSO route already present — skipping."
+  fi
+else
+  warn "RootComponent.tsx not found — skipping SSO route fix."
+fi
+
+# ·· Gotcha #17: URLSearchParams .toString() ··································
+# Without .toString(), JSON.stringify produces "{}" and OIDC token exchange
+# fails with "grant_type missing".
+info "Fixing URLSearchParams serialization (Gotcha #17)…"
+
+SSO_SVC="fluxer-src/packages/api/src/auth/services/SsoService.tsx"
+if [[ -f "$SSO_SVC" ]]; then
+  if grep -q 'new URLSearchParams' "$SSO_SVC" && ! grep -q '\.toString()' "$SSO_SVC"; then
+    awk '
+      /new URLSearchParams/ { in_params = 1 }
+      in_params && /\}\)/ {
+        sub(/\}\);/, "}).toString();")
+        in_params = 0
+      }
+      { print }
+    ' "$SSO_SVC" > "${SSO_SVC}.tmp" && mv "${SSO_SVC}.tmp" "$SSO_SVC"
+    success "URLSearchParams .toString() added."
+  else
+    info "URLSearchParams already has .toString() — skipping."
+  fi
+else
+  warn "SsoService.tsx not found — skipping URLSearchParams fix."
+fi
+
+# ·· Gotcha #18: SSO client secret not loaded for token exchange ··············
+info "Fixing getSsoConfig includeSecret (Gotcha #18)…"
+
+if [[ -f "$SSO_SVC" ]]; then
+  if grep -q 'getSsoConfig()' "$SSO_SVC"; then
+    # Only change the call inside getResolvedConfig (the one without args)
+    sed -i 's/this\.instanceConfigRepository\.getSsoConfig()/this.instanceConfigRepository.getSsoConfig({includeSecret: true})/' "$SSO_SVC"
+    success "getSsoConfig now includes secret."
+  else
+    info "getSsoConfig already passes includeSecret — skipping."
+  fi
+fi
+
+# ·· Gotcha #19: SSO timeout masks actual error ·······························
+# The SsoCallbackPage timeout fires even after success/failure, overwriting
+# the real error message.
+info "Fixing SSO callback timeout cleanup (Gotcha #19)…"
+
+SSO_CB="fluxer-src/fluxer_app/src/components/pages/SsoCallbackPage.tsx"
+if [[ -f "$SSO_CB" ]]; then
+  if grep -q 'timeoutId' "$SSO_CB" && ! grep -q 'clearTimeout(timeoutId)' "$SSO_CB"; then
+    # Add clearTimeout in the catch block
+    awk '
+      /catch/ && timeout_seen && !patched {
+        print
+        getline
+        print
+        print "          clearTimeout(timeoutId);"
+        patched = 1
+        next
+      }
+      /timeoutId/ { timeout_seen = 1 }
+      { print }
+    ' "$SSO_CB" > "${SSO_CB}.tmp" && mv "${SSO_CB}.tmp" "$SSO_CB"
+    success "SSO timeout cleanup added."
+  else
+    info "SSO timeout already cleaned up — skipping."
+  fi
+else
+  warn "SsoCallbackPage.tsx not found — skipping timeout fix."
+fi
+
+# ·· Gotcha #20: SSO users treated as unclaimed ·······························
+# SSO users have null password_hash, so isUnclaimedAccount() returns true,
+# blocking ~15 features. Exclude users with the 'sso' trait.
+info "Fixing isUnclaimedAccount for SSO users (Gotcha #20)…"
+
+USER_MODEL="fluxer-src/packages/api/src/models/User.tsx"
+if [[ -f "$USER_MODEL" ]]; then
+  if grep -q "this\.passwordHash === null && !this\.isBot" "$USER_MODEL" && \
+     ! grep -q "_traits\.has('sso')" "$USER_MODEL"; then
+    sed -i "s/this\.passwordHash === null \&\& !this\.isBot/this.passwordHash === null \&\& !this.isBot \&\& !this._traits.has('sso')/" "$USER_MODEL"
+    success "isUnclaimedAccount now excludes SSO users."
+  else
+    info "isUnclaimedAccount already handles SSO — skipping."
+  fi
+else
+  warn "User.tsx not found — skipping unclaimed account fix."
+fi
+
+success "All source patches applied."
+
+# ── Build Docker image ───────────────────────────────────────────────────────
 echo ""
 warn "Building Docker image — this takes 20–30 minutes on first run."
 info "Subsequent builds with cached layers are much faster."
