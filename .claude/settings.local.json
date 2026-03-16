@@ -3,7 +3,12 @@
     "allow": [
       "Bash(tree:*)",
       "Bash(find:*)",
-      "Bash(git ls-tree:*)"
+      "Bash(git ls-tree:*)",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "Bash(gh release:*)",
+      "Bash(gh.exe release:*)",
+      "WebFetch(domain:api.github.com)"
     ]
   }
 }

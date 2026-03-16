@@ -402,7 +402,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.93.0 --target wasm32-unknown-unknown
 ENV PATH="/root/.cargo/bin:${PATH}"
-RUN cargo install wasm-pack
+RUN curl -sSL https://github.com/rustwasm/wasm-pack/releases/download/v0.14.0/wasm-pack-v0.14.0-x86_64-unknown-linux-musl.tar.gz \
+    | tar xzf - --strip-components=1 -C /root/.cargo/bin wasm-pack-v0.14.0-x86_64-unknown-linux-musl/wasm-pack
 RUSTBLOCK
 
   awk '
