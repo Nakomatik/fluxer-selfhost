@@ -729,19 +729,23 @@ DEDUP_SCRIPT="fluxer-src/fluxer_server/content-length-fix.cjs"
 if [[ ! -f "$DEDUP_SCRIPT" ]]; then
   cat > "$DEDUP_SCRIPT" <<'CLPATCH'
 // CONTENT_LENGTH_DEDUP: Prevent duplicate Content-Length headers (Gotcha #23)
-// Hono sets lowercase content-length, app code sets title-case Content-Length.
-// nginx rejects duplicate Content-Length with 502 on all /media/* requests.
+// Duplicates occur when setHeader('content-length') AND writeHead(status, { 'Content-Length' })
+// are both called. getHeaders() only sees the setHeader one; the writeHead one is written
+// directly to the socket. Fix: if writeHead receives a headers object with Content-Length,
+// remove any content-length previously set via setHeader.
 const http = require('node:http');
 const _origWriteHead = http.ServerResponse.prototype.writeHead;
-http.ServerResponse.prototype.writeHead = function(sc, ...args) {
-  const hdrs = this.getHeaders();
-  const clKeys = Object.keys(hdrs).filter(k => k.toLowerCase() === 'content-length');
-  if (clKeys.length > 1) {
-    const val = hdrs[clKeys[0]];
-    clKeys.forEach(k => this.removeHeader(k));
-    this.setHeader('content-length', val);
+http.ServerResponse.prototype.writeHead = function() {
+  for (let i = 1; i < arguments.length; i++) {
+    const arg = arguments[i];
+    if (arg && typeof arg === 'object' && !Array.isArray(arg)) {
+      if (Object.keys(arg).some(k => k.toLowerCase() === 'content-length')) {
+        this.removeHeader('content-length');
+      }
+      break;
+    }
   }
-  return _origWriteHead.call(this, sc, ...args);
+  return _origWriteHead.apply(this, arguments);
 };
 CLPATCH
 
