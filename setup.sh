@@ -674,13 +674,7 @@ info "Adding moxcms downgrade step to Dockerfile (Gotcha #24)…"
 if ! grep -q 'cargo update.*moxcms' "$DOCKERFILE"; then
   # Insert before the "pnpm lingui:compile && pnpm build" line in app-build stage
   sed -i '/cd fluxer_app && pnpm lingui:compile && pnpm build/i\
-RUN LIBFLUXCORE_DIR=$(find /usr/src/app/fluxer_app -name Cargo.toml -path "*/libfluxcore/*" -exec dirname {} \\; | head -1) \
-    && if [ -n "$LIBFLUXCORE_DIR" ]; then \
-         cd "$LIBFLUXCORE_DIR" \
-         && cargo update -p moxcms --precise 0.8.0 2>/dev/null \
-         || cargo update -p moxcms --precise 0.7.11 2>/dev/null \
-         || echo "WARN: could not downgrade moxcms"; \
-       fi' "$DOCKERFILE"
+RUN cd /usr/src/app/fluxer_app/crates/libfluxcore 2>/dev/null && (cargo update -p moxcms --precise 0.8.0 2>/dev/null || cargo update -p moxcms --precise 0.7.11 2>/dev/null || true)' "$DOCKERFILE"
   success "moxcms downgrade step added to Dockerfile."
 else
   info "moxcms downgrade already present — skipping."
@@ -726,39 +720,15 @@ success "Typecheck step removed."
 # sets it automatically. We search packages/media_proxy for the offending header.
 info "Fixing duplicate Content-Length in media proxy responses (Gotcha #23)…"
 
-MEDIA_PROXY_DIR="fluxer-src/packages/media_proxy/src"
-MEDIA_PROXY_UTILS_DIR="fluxer-src/packages/media_proxy_utils/src"
-PATCHED_CL=false
-
-for dir in "$MEDIA_PROXY_DIR" "$MEDIA_PROXY_UTILS_DIR"; do
-  if [[ -d "$dir" ]]; then
-    # Find files that explicitly set Content-Length in response headers
-    while IFS= read -r file; do
-      # Remove lines that set Content-Length/content-length in header objects
-      # e.g. 'Content-Length': String(size), or 'content-length': buffer.length,
-      if sed -i "/'[Cc]ontent-[Ll]ength'\s*:/d" "$file" 2>/dev/null; then
-        PATCHED_CL=true
-        info "Removed explicit Content-Length from $(basename "$file")"
-      fi
-    done < <(grep -rli "content-length" "$dir" 2>/dev/null || true)
-  fi
-done
-
-if $PATCHED_CL; then
-  success "Duplicate Content-Length fix applied."
-else
-  # Fallback: if we can't find the source pattern, patch the server entry point
-  # to deduplicate Content-Length at the Node.js HTTP layer.
-  warn "Could not find explicit Content-Length in media proxy source."
-  warn "Applying Node.js-level header deduplication fallback…"
-
-  SERVER_INDEX="fluxer-src/fluxer_server/src/index.tsx"
-  if [[ -f "$SERVER_INDEX" ]] && ! grep -q 'CONTENT_LENGTH_DEDUP' "$SERVER_INDEX"; then
-    cat >> "$SERVER_INDEX" <<'CLPATCH'
+# The fix: monkey-patch Node.js writeHead to deduplicate Content-Length headers.
+# This catches ALL cases regardless of which source file sets the duplicate.
+SERVER_INDEX="fluxer-src/fluxer_server/src/index.tsx"
+if [[ -f "$SERVER_INDEX" ]] && ! grep -q 'CONTENT_LENGTH_DEDUP' "$SERVER_INDEX"; then
+  cat >> "$SERVER_INDEX" <<'CLPATCH'
 
 // CONTENT_LENGTH_DEDUP: Prevent duplicate Content-Length headers (Gotcha #23)
 // Hono sets lowercase content-length, app code sets title-case Content-Length.
-// nginx rejects duplicate Content-Length with 502.
+// nginx rejects duplicate Content-Length with 502 on all /media/* requests.
 const _origWriteHead = require('http').ServerResponse.prototype.writeHead;
 require('http').ServerResponse.prototype.writeHead = function(sc, ...args) {
   const hdrs = this.getHeaders();
@@ -771,10 +741,9 @@ require('http').ServerResponse.prototype.writeHead = function(sc, ...args) {
   return _origWriteHead.call(this, sc, ...args);
 };
 CLPATCH
-    success "Content-Length dedup patch added to server entry point."
-  else
-    info "Server entry point already patched or not found — skipping."
-  fi
+  success "Content-Length dedup patch added to server entry point."
+else
+  info "Content-Length dedup already applied or index.tsx not found — skipping."
 fi
 
 success "All source patches applied."
