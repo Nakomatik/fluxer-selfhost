@@ -664,6 +664,28 @@ else
   warn "libfluxcore Cargo.toml not found — skipping."
 fi
 
+# ·· Gotcha #24: moxcms 0.8.1 const-eval crash on wasm32 ························
+# The moxcms 0.8.1 crate has a const-eval bug: PQ_LUT_TABLE uses pxfm::log()
+# which triggers "scalar size mismatch" on wasm32-unknown-unknown. This crashes
+# the frontend WASM build (fluxer_app → libfluxcore → moxcms).
+# Fix: Add a Dockerfile step to downgrade moxcms before the build.
+info "Adding moxcms downgrade step to Dockerfile (Gotcha #24)…"
+
+if ! grep -q 'cargo update.*moxcms' "$DOCKERFILE"; then
+  # Insert before the "pnpm lingui:compile && pnpm build" line in app-build stage
+  sed -i '/cd fluxer_app && pnpm lingui:compile && pnpm build/i\
+RUN LIBFLUXCORE_DIR=$(find /usr/src/app/fluxer_app -name Cargo.toml -path "*/libfluxcore/*" -exec dirname {} \\; | head -1) \
+    && if [ -n "$LIBFLUXCORE_DIR" ]; then \
+         cd "$LIBFLUXCORE_DIR" \
+         && cargo update -p moxcms --precise 0.8.0 2>/dev/null \
+         || cargo update -p moxcms --precise 0.7.11 2>/dev/null \
+         || echo "WARN: could not downgrade moxcms"; \
+       fi' "$DOCKERFILE"
+  success "moxcms downgrade step added to Dockerfile."
+else
+  info "moxcms downgrade already present — skipping."
+fi
+
 # ·· Gotcha #21: BlueskyOAuthService crashes /.well-known/fluxer ···············
 # The Bluesky AT Protocol OAuth client requires a JWK signing key with a "kid"
 # property for private_key_jwt authentication. Without it, the NodeOAuthClient

@@ -8,7 +8,8 @@
       "WebFetch(domain:github.com)",
       "Bash(gh release:*)",
       "Bash(gh.exe release:*)",
-      "WebFetch(domain:api.github.com)"
+      "WebFetch(domain:api.github.com)",
+      "WebFetch(domain:crates.io)"
     ]
   }
 }
