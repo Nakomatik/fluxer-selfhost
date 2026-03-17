@@ -9,7 +9,9 @@
       "Bash(gh release:*)",
       "Bash(gh.exe release:*)",
       "WebFetch(domain:api.github.com)",
-      "WebFetch(domain:crates.io)"
+      "WebFetch(domain:crates.io)",
+      "Bash(grep:*)",
+      "WebFetch(domain:forum.directadmin.com)"
     ]
   }
 }
