@@ -51,6 +51,21 @@ services:
       start_period: 30s
     logging: *default-logging
 
+  # ── Media header normalizer (required — fixes duplicate Content-Length) ─────
+  # The fluxer server sends duplicate Content-Length headers (different casing),
+  # which nginx strictly rejects with 502. Caddy's Go HTTP parser consolidates
+  # duplicate same-value headers, so it acts as a normalizer between nginx and
+  # fluxer for /media/* requests.
+  media-proxy:
+    image: caddy:alpine
+    container_name: fluxer_media_proxy
+    restart: unless-stopped
+    command: caddy reverse-proxy --from :8081 --to fluxer:8080
+    depends_on:
+      fluxer:
+        condition: service_healthy
+    logging: *default-logging
+
   # ── Nginx reverse proxy (required — handles HTTPS) ─────────────────────────
   nginx:
     image: nginx:alpine
@@ -66,6 +81,8 @@ services:
     depends_on:
       fluxer:
         condition: service_healthy
+      media-proxy:
+        condition: service_started
     logging: *default-logging
 
   # ── Certbot — automatic Let's Encrypt certificate renewal ─────────────────
