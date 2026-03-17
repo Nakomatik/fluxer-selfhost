@@ -722,15 +722,18 @@ info "Fixing duplicate Content-Length in media proxy responses (Gotcha #23)…"
 
 # The fix: monkey-patch Node.js writeHead to deduplicate Content-Length headers.
 # This catches ALL cases regardless of which source file sets the duplicate.
-SERVER_INDEX="fluxer-src/fluxer_server/src/index.tsx"
-if [[ -f "$SERVER_INDEX" ]] && ! grep -q 'CONTENT_LENGTH_DEDUP' "$SERVER_INDEX"; then
-  cat >> "$SERVER_INDEX" <<'CLPATCH'
-
+# The server uses ESM (tsx), so we create a Node.js --require preload script
+# that runs before any ESM module loads. This is injected via NODE_OPTIONS
+# in the Dockerfile's ENTRYPOINT or ENV.
+DEDUP_SCRIPT="fluxer-src/fluxer_server/content-length-fix.cjs"
+if [[ ! -f "$DEDUP_SCRIPT" ]]; then
+  cat > "$DEDUP_SCRIPT" <<'CLPATCH'
 // CONTENT_LENGTH_DEDUP: Prevent duplicate Content-Length headers (Gotcha #23)
 // Hono sets lowercase content-length, app code sets title-case Content-Length.
 // nginx rejects duplicate Content-Length with 502 on all /media/* requests.
-const _origWriteHead = require('http').ServerResponse.prototype.writeHead;
-require('http').ServerResponse.prototype.writeHead = function(sc, ...args) {
+const http = require('node:http');
+const _origWriteHead = http.ServerResponse.prototype.writeHead;
+http.ServerResponse.prototype.writeHead = function(sc, ...args) {
   const hdrs = this.getHeaders();
   const clKeys = Object.keys(hdrs).filter(k => k.toLowerCase() === 'content-length');
   if (clKeys.length > 1) {
@@ -741,9 +744,14 @@ require('http').ServerResponse.prototype.writeHead = function(sc, ...args) {
   return _origWriteHead.call(this, sc, ...args);
 };
 CLPATCH
-  success "Content-Length dedup patch added to server entry point."
+
+  # Add NODE_OPTIONS to the Dockerfile so the .cjs preload runs before ESM
+  if ! grep -q 'content-length-fix' "$DOCKERFILE"; then
+    sed -i '/^ENTRYPOINT/i\ENV NODE_OPTIONS="--require /usr/src/app/fluxer_server/content-length-fix.cjs"' "$DOCKERFILE"
+  fi
+  success "Content-Length dedup preload script created."
 else
-  info "Content-Length dedup already applied or index.tsx not found — skipping."
+  info "Content-Length dedup script already exists — skipping."
 fi
 
 success "All source patches applied."
