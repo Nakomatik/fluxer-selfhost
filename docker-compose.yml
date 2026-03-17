@@ -127,6 +127,7 @@ services:
       - "7880:7880"               # HTTP / WebSocket signaling
       - "7881:7881"               # TCP WebRTC ICE fallback
       - "3478:3478/udp"           # STUN / TURN
+      - "5349:5349"               # TURN over TLS
       - "50000-50100:50000-50100/udp"  # WebRTC media streams
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:7880 || exit 1"]

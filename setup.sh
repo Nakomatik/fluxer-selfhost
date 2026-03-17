@@ -694,6 +694,67 @@ info "Removing typecheck step from Dockerfile (upstream TS2559)…"
 sed -i 's|^RUN cd fluxer_server && pnpm typecheck|# typecheck skipped — upstream type errors|' "$DOCKERFILE"
 success "Typecheck step removed."
 
+# ·· Gotcha #23: Media proxy sends duplicate Content-Length headers ·············
+# The fluxer media proxy sets Content-Length explicitly (title-case) AND Hono/Node.js
+# also sets content-length (lowercase) when writing the response. nginx strictly
+# rejects duplicate Content-Length per HTTP spec → 502 on ALL /media/* requests.
+# Images appear blurry (thumbnails cached from upload work, but resized versions fail)
+# and stickers don't load at all.
+# Fix: Remove explicit Content-Length from media proxy responses — the framework
+# sets it automatically. We search packages/media_proxy for the offending header.
+info "Fixing duplicate Content-Length in media proxy responses (Gotcha #23)…"
+
+MEDIA_PROXY_DIR="fluxer-src/packages/media_proxy/src"
+MEDIA_PROXY_UTILS_DIR="fluxer-src/packages/media_proxy_utils/src"
+PATCHED_CL=false
+
+for dir in "$MEDIA_PROXY_DIR" "$MEDIA_PROXY_UTILS_DIR"; do
+  if [[ -d "$dir" ]]; then
+    # Find files that explicitly set Content-Length in response headers
+    while IFS= read -r file; do
+      # Remove lines that set Content-Length/content-length in header objects
+      # e.g. 'Content-Length': String(size), or 'content-length': buffer.length,
+      if sed -i "/'[Cc]ontent-[Ll]ength'\s*:/d" "$file" 2>/dev/null; then
+        PATCHED_CL=true
+        info "Removed explicit Content-Length from $(basename "$file")"
+      fi
+    done < <(grep -rli "content-length" "$dir" 2>/dev/null || true)
+  fi
+done
+
+if $PATCHED_CL; then
+  success "Duplicate Content-Length fix applied."
+else
+  # Fallback: if we can't find the source pattern, patch the server entry point
+  # to deduplicate Content-Length at the Node.js HTTP layer.
+  warn "Could not find explicit Content-Length in media proxy source."
+  warn "Applying Node.js-level header deduplication fallback…"
+
+  SERVER_INDEX="fluxer-src/fluxer_server/src/index.tsx"
+  if [[ -f "$SERVER_INDEX" ]] && ! grep -q 'CONTENT_LENGTH_DEDUP' "$SERVER_INDEX"; then
+    cat >> "$SERVER_INDEX" <<'CLPATCH'
+
+// CONTENT_LENGTH_DEDUP: Prevent duplicate Content-Length headers (Gotcha #23)
+// Hono sets lowercase content-length, app code sets title-case Content-Length.
+// nginx rejects duplicate Content-Length with 502.
+const _origWriteHead = require('http').ServerResponse.prototype.writeHead;
+require('http').ServerResponse.prototype.writeHead = function(sc, ...args) {
+  const hdrs = this.getHeaders();
+  const clKeys = Object.keys(hdrs).filter(k => k.toLowerCase() === 'content-length');
+  if (clKeys.length > 1) {
+    const val = hdrs[clKeys[0]];
+    clKeys.forEach(k => this.removeHeader(k));
+    this.setHeader('content-length', val);
+  }
+  return _origWriteHead.call(this, sc, ...args);
+};
+CLPATCH
+    success "Content-Length dedup patch added to server entry point."
+  else
+    info "Server entry point already patched or not found — skipping."
+  fi
+fi
+
 success "All source patches applied."
 
 # ── Build Docker image ───────────────────────────────────────────────────────
@@ -883,6 +944,16 @@ success "config/config.json written."
 if $ENABLE_VOICE; then
   header "Writing livekit/livekit.yaml…"
 
+  # Detect the server's public IP so LiveKit advertises correct ICE candidates.
+  # Inside Docker, use_external_ip only sees the bridge IP — node_ip must be set explicitly.
+  SERVER_PUBLIC_IP=$(curl -4 -sf --max-time 5 https://ifconfig.me || curl -4 -sf --max-time 5 https://api.ipify.org || echo "")
+  if [[ -z "$SERVER_PUBLIC_IP" ]]; then
+    warn "Could not auto-detect public IP. LiveKit voice calls may not work."
+    warn "Set node_ip manually in livekit/livekit.yaml after setup."
+  else
+    info "Detected public IP: ${SERVER_PUBLIC_IP}"
+  fi
+
   # Generated directly rather than sed-replacing the example, so we can include
   # the webhook section (Gotcha #6) and RTC port range.
   cat > livekit/livekit.yaml <<LKEOF
@@ -896,11 +967,12 @@ rtc:
   port_range_start: 50000
   port_range_end: 50100
   use_external_ip: true
-  node_ip: ""
+  node_ip: "${SERVER_PUBLIC_IP}"
 
 turn:
   enabled: true
   udp_port: 3478
+  tls_port: 5349
 
 room:
   auto_create: true
@@ -1157,6 +1229,7 @@ if $ENABLE_VOICE; then
     header "Opening firewall ports for LiveKit…"
     ufw allow 7881/tcp  comment 'Fluxer LiveKit ICE TCP' 2>/dev/null || true
     ufw allow 3478/udp  comment 'Fluxer LiveKit TURN/STUN' 2>/dev/null || true
+    ufw allow 5349/tcp  comment 'Fluxer LiveKit TURN TLS' 2>/dev/null || true
     ufw allow 50000:50100/udp comment 'Fluxer LiveKit RTP media' 2>/dev/null || true
     success "Firewall ports opened for voice/video."
   fi
@@ -1164,6 +1237,40 @@ fi
 
 $COMPOSE $PROFILES up -d
 success "Fluxer is up!"
+
+# ── Post-deploy health check ────────────────────────────────────────────────
+header "Verifying deployment health…"
+info "Waiting for server to become healthy…"
+
+HEALTH_OK=false
+for i in $(seq 1 12); do
+  sleep 5
+  HEALTH=$(curl -sf http://127.0.0.1:8080/_health 2>/dev/null || echo '{}')
+  STATUS=$(echo "$HEALTH" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
+  if [[ "$STATUS" == "healthy" ]]; then
+    HEALTH_OK=true
+    break
+  fi
+  info "Attempt ${i}/12 — server not ready yet…"
+done
+
+if $HEALTH_OK; then
+  success "Server is healthy!"
+
+  # Check individual services
+  MEDIA_STATUS=$(echo "$HEALTH" | grep -o '"mediaProxy":{[^}]*}' | grep -o '"status":"[^"]*"' | cut -d'"' -f4)
+  if [[ "$MEDIA_STATUS" != "healthy" ]]; then
+    warn "Media proxy is NOT healthy (status: ${MEDIA_STATUS:-unknown})."
+    warn "Images and stickers will not work. Check logs:"
+    echo -e "  ${CYAN}docker logs fluxer 2>&1 | grep -iE 'error|media|sharp|vips|onnx' | tail -20${RESET}"
+  else
+    success "Media proxy: healthy"
+  fi
+else
+  warn "Server did not become healthy within 60 seconds."
+  warn "Check logs for errors:"
+  echo -e "  ${CYAN}docker logs fluxer --tail 50${RESET}"
+fi
 
 # ── Done ──────────────────────────────────────────────────────────────────────
 echo ""
@@ -1184,6 +1291,7 @@ if $ENABLE_VOICE; then
   info "Voice/video requires these ports open on your server:"
   echo -e "  ${CYAN}sudo ufw allow 7881/tcp${RESET}   # LiveKit ICE TCP fallback"
   echo -e "  ${CYAN}sudo ufw allow 3478/udp${RESET}   # TURN/STUN"
+  echo -e "  ${CYAN}sudo ufw allow 5349/tcp${RESET}   # TURN over TLS"
   echo -e "  ${CYAN}sudo ufw allow 50000:50100/udp${RESET}  # RTP media streams"
   echo ""
 fi
