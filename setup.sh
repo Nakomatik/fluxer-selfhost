@@ -976,6 +976,8 @@ rtc:
 turn:
   enabled: true
   domain: ${DOMAIN}
+  cert_file: /etc/letsencrypt/live/${DOMAIN}/fullchain.pem
+  key_file: /etc/letsencrypt/live/${DOMAIN}/privkey.pem
   udp_port: 3478
   tls_port: 5349
 
