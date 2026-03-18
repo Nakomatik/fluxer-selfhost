@@ -11,7 +11,9 @@
       "WebFetch(domain:api.github.com)",
       "WebFetch(domain:crates.io)",
       "Bash(grep:*)",
-      "WebFetch(domain:forum.directadmin.com)"
+      "WebFetch(domain:forum.directadmin.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(ls:*)"
     ]
   }
 }
