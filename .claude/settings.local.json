@@ -13,7 +13,8 @@
       "Bash(grep:*)",
       "WebFetch(domain:forum.directadmin.com)",
       "WebFetch(domain:raw.githubusercontent.com)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(gh api:*)"
     ]
   }
 }

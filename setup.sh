@@ -759,6 +759,26 @@ else
   info "Content-Length dedup script already exists — skipping."
 fi
 
+# ·· Gotcha #31: guild_client:do_call crashes on bare `ok` return ··············
+# The gen_server handler for guild voice_state_update can return bare `ok`,
+# but do_call/3's try…of only matches maps and {error,...} tuples.
+# This causes {try_clause, ok} crash → server voice channels fail.
+info "Fixing guild_client:do_call try_clause crash (Gotcha #31)…"
+
+GUILD_CLIENT="fluxer-src/fluxer_gateway/src/guild/guild_client.erl"
+if [[ -f "$GUILD_CLIENT" ]]; then
+  if ! grep -q 'ok -> {ok, #{success => true}}' "$GUILD_CLIENT"; then
+    sed -i '/try gen_server:call(GuildPid, {voice_state_update, Request}, Timeout) of/,/catch/ {
+      /catch/i\        ok -> {ok, #{success => true}};
+    }' "$GUILD_CLIENT"
+    success "guild_client.erl patched — bare ok now handled."
+  else
+    info "guild_client.erl already patched — skipping."
+  fi
+else
+  warn "guild_client.erl not found — skipping patch."
+fi
+
 success "All source patches applied."
 
 # ── Build Docker image ───────────────────────────────────────────────────────
