@@ -137,6 +137,9 @@ services:
     container_name: fluxer_livekit
     profiles: ["voice"]
     restart: unless-stopped
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     command: ["--config", "/etc/livekit/livekit.yaml"]
     volumes:
       - ./livekit/livekit.yaml:/etc/livekit/livekit.yaml:ro

@@ -970,11 +970,12 @@ rtc:
   tcp_port: 7881
   port_range_start: 50000
   port_range_end: 50100
-  use_external_ip: true
+  use_external_ip: false
   node_ip: "${SERVER_PUBLIC_IP}"
 
 turn:
   enabled: true
+  domain: ${DOMAIN}
   udp_port: 3478
   tls_port: 5349
 
