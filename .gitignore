@@ -3,6 +3,11 @@
 config/config.json
 nginx/ssl/
 livekit/livekit.yaml
+configs.txt
+docker-compose.override.yml
+
+# Cloned source tree (built during setup)
+fluxer-src/
 
 # Let's Encrypt certificates (stored in Docker volumes, not needed here)
 certbot/
