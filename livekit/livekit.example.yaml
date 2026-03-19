@@ -15,9 +15,9 @@ rtc:
 
 turn:
   enabled: true
+  domain: YOUR_DOMAIN
   udp_port: 3478
-  # Set if your server is behind NAT and you want TURN to use a specific domain.
-  # domain: turn.YOUR_DOMAIN
+  tls_port: 5349
 
 room:
   auto_create: true

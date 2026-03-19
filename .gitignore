@@ -12,3 +12,4 @@ certbot/
 *.swp
 *.swo
 Thumbs.db
+.claude

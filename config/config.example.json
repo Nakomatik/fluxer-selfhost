@@ -59,7 +59,7 @@
       "enabled": false,
       "api_key": "REPLACE_LIVEKIT_API_KEY",
       "api_secret": "REPLACE_LIVEKIT_API_SECRET",
-      "url": "wss://YOUR_DOMAIN",
+      "url": "wss://YOUR_DOMAIN/livekit",
       "webhook_url": "http://fluxer:8080/api/webhooks/livekit",
       "default_region": {
         "id": "default",

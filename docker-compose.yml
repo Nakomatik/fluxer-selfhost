@@ -51,6 +51,21 @@ services:
       start_period: 30s
     logging: *default-logging
 
+  # ── Media header normalizer (required — fixes duplicate Content-Length) ─────
+  # The fluxer server sends duplicate Content-Length headers (different casing),
+  # which nginx strictly rejects with 502. Caddy's Go HTTP parser consolidates
+  # duplicate same-value headers, so it acts as a normalizer between nginx and
+  # fluxer for /media/* requests.
+  media-proxy:
+    image: caddy:alpine
+    container_name: fluxer_media_proxy
+    restart: unless-stopped
+    command: caddy reverse-proxy --from :8081 --to fluxer:8080
+    depends_on:
+      fluxer:
+        condition: service_healthy
+    logging: *default-logging
+
   # ── Nginx reverse proxy (required — handles HTTPS) ─────────────────────────
   nginx:
     image: nginx:alpine
@@ -64,13 +79,18 @@ services:
       - certbot_certs:/etc/letsencrypt:ro
       - certbot_webroot:/var/www/certbot:ro
     depends_on:
-      - fluxer
+      fluxer:
+        condition: service_healthy
+      media-proxy:
+        condition: service_started
     logging: *default-logging
 
   # ── Certbot — automatic Let's Encrypt certificate renewal ─────────────────
   certbot:
     image: certbot/certbot:latest
     container_name: fluxer_certbot
+    depends_on:
+      - nginx
     volumes:
       - certbot_certs:/etc/letsencrypt
       - certbot_webroot:/var/www/certbot
@@ -117,13 +137,18 @@ services:
     container_name: fluxer_livekit
     profiles: ["voice"]
     restart: unless-stopped
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     command: ["--config", "/etc/livekit/livekit.yaml"]
     volumes:
       - ./livekit/livekit.yaml:/etc/livekit/livekit.yaml:ro
+      - certbot_certs:/etc/letsencrypt:ro
     ports:
       - "7880:7880"               # HTTP / WebSocket signaling
       - "7881:7881"               # TCP WebRTC ICE fallback
       - "3478:3478/udp"           # STUN / TURN
+      - "5349:5349"               # TURN over TLS
       - "50000-50100:50000-50100/udp"  # WebRTC media streams
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:7880 || exit 1"]
