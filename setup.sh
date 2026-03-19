@@ -768,9 +768,9 @@ info "Fixing guild_client:do_call try_clause crash (Gotcha #31)…"
 GUILD_CLIENT="fluxer-src/fluxer_gateway/src/guild/guild_client.erl"
 if [[ -f "$GUILD_CLIENT" ]]; then
   if ! grep -q 'ok -> {ok, #{success => true}}' "$GUILD_CLIENT"; then
-    sed -i '/try gen_server:call(GuildPid, {voice_state_update, Request}, Timeout) of/,/catch/ {
-      /catch/i\        ok -> {ok, #{success => true}};
-    }' "$GUILD_CLIENT"
+    # Insert before the {error, Category, ErrorAtom} clause so it's not the last
+    # clause before catch (last clause must not end with semicolon in Erlang)
+    sed -i '/{error, Category, ErrorAtom} when is_atom(Category), is_atom(ErrorAtom)/i\        ok -> {ok, #{success => true}};' "$GUILD_CLIENT"
     success "guild_client.erl patched — bare ok now handled."
   else
     info "guild_client.erl already patched — skipping."
