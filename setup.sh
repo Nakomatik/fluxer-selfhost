@@ -675,13 +675,14 @@ success "Typecheck step removed."
 
 # #23: Duplicate Content-Length headers → nginx 502 on /media/*
 info "Fixing duplicate Content-Length headers (#23)…"
-DEDUP_SCRIPT="fluxer-src/fluxer_server/content-length-fix.cjs"
+DEDUP_SCRIPT="fluxer-src/fluxer_server/content-length-fix.mjs"
 if [[ ! -f "$DEDUP_SCRIPT" ]]; then
   cat > "$DEDUP_SCRIPT" <<'CLPATCH'
 // Deduplicate Content-Length headers — Hono sets lowercase, app sets title-case.
 // nginx rejects duplicates per HTTP spec → 502. Block setHeader entirely for
 // Content-Length; let Node.js auto-generate it from res.end(data).
-const http = require('node:http');
+// Uses ESM (--import) because fluxer_server is "type":"module" — require() is unavailable.
+import http from 'node:http';
 
 const _origSetHeader = http.ServerResponse.prototype.setHeader;
 http.ServerResponse.prototype.setHeader = function(name, value) {
@@ -696,9 +697,9 @@ http.ServerResponse.prototype.writeHead = function() {
 };
 CLPATCH
 
-  # Preload the .cjs fix via NODE_OPTIONS
+  # Preload via --import (ESM, Node ≥21) — --require fails in ESM packages on Node v24+
   if ! grep -q 'content-length-fix' "$DOCKERFILE"; then
-    sed -i '/^ENTRYPOINT/i\ENV NODE_OPTIONS="--require /usr/src/app/fluxer_server/content-length-fix.cjs"' "$DOCKERFILE"
+    sed -i '/^ENTRYPOINT/i\ENV NODE_OPTIONS="--import file:///usr/src/app/fluxer_server/content-length-fix.mjs"' "$DOCKERFILE"
   fi
   success "Content-Length dedup preload script created."
 else
@@ -937,7 +938,7 @@ rtc:
   node_ip: "${SERVER_PUBLIC_IP}"
 
 turn:
-  enabled: true
+  enabled: $($EXTERNAL_PROXY && echo false || echo true)
   domain: ${DOMAIN}
   cert_file: /etc/letsencrypt/live/${DOMAIN}/fullchain.pem
   key_file: /etc/letsencrypt/live/${DOMAIN}/privkey.pem
