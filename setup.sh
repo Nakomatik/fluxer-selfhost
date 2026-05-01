@@ -168,7 +168,7 @@ CACHE_FILE="configs.txt"
 CACHED_DOMAIN="" CACHED_LE_EMAIL=""
 CACHED_ENABLE_SEARCH="" CACHED_ENABLE_VOICE="" CACHED_ENABLE_EMAIL=""
 CACHED_SMTP_HOST="" CACHED_SMTP_PORT="" CACHED_SMTP_USER="" CACHED_SMTP_PASS="" CACHED_SMTP_FROM=""
-CACHED_SSL_METHOD="" CACHED_CF_API_TOKEN=""
+CACHED_SSL_METHOD="" CACHED_CF_API_TOKEN="" CACHED_EXTERNAL_PROXY=""
 
 if [[ -f "$CACHE_FILE" ]]; then
   info "Found ${CACHE_FILE} from a previous run — loading cached values as defaults."
@@ -188,6 +188,7 @@ if [[ -f "$CACHE_FILE" ]]; then
       SMTP_FROM)      CACHED_SMTP_FROM="$value" ;;
       SSL_METHOD)     CACHED_SSL_METHOD="$value" ;;
       CF_API_TOKEN)   CACHED_CF_API_TOKEN="$value" ;;
+      EXTERNAL_PROXY) CACHED_EXTERNAL_PROXY="$value" ;;
     esac
   done < "$CACHE_FILE"
 fi
@@ -232,52 +233,61 @@ if prompt_yn "Enable email (for registration/password reset)?" "$DEFAULT_EMAIL";
   prompt SMTP_FROM "From address"           "${CACHED_SMTP_FROM:-noreply@${DOMAIN}}"
 fi
 
-header "SSL certificate method"
-info "Choose how to obtain your SSL certificate:"
-echo -e "  ${BOLD}1${RESET}) HTTP-01 challenge (default — port 80 reachable, no CDN proxy)"
-echo -e "  ${BOLD}2${RESET}) Cloudflare Origin Certificate (paste cert + key — easiest for Cloudflare)"
-echo -e "  ${BOLD}3${RESET}) Cloudflare DNS-01 challenge (automated, needs API token)"
-echo -e "  ${BOLD}4${RESET}) Skip — I already have certificates or will set them up manually"
-
-SSL_METHOD="${CACHED_SSL_METHOD:-1}"
-prompt SSL_METHOD "SSL method [1/2/3/4]" "$SSL_METHOD"
-# Normalize
-case "$SSL_METHOD" in
-  2|origin|cf|cloudflare) SSL_METHOD=2 ;;
-  3|dns|dns-01)           SSL_METHOD=3 ;;
-  4|skip|manual|none)     SSL_METHOD=4 ;;
-  *)                      SSL_METHOD=1 ;;
-esac
+EXTERNAL_PROXY=false
+DEFAULT_EXT_PROXY="n"; [[ "$CACHED_EXTERNAL_PROXY" == "true" ]] && DEFAULT_EXT_PROXY="y"
+if prompt_yn "Use an external reverse proxy for TLS termination (skips built-in nginx and SSL setup)?" "$DEFAULT_EXT_PROXY"; then
+  EXTERNAL_PROXY=true
+fi
 
 CF_API_TOKEN=""
 SSL_CERT_PEM=""
 SSL_KEY_PEM=""
+SSL_METHOD=4
 
-if [[ "$SSL_METHOD" == "2" ]]; then
-  echo ""
-  info "Go to Cloudflare Dashboard → your domain → SSL/TLS → Origin Server → Create Certificate"
-  info "Keep defaults (RSA, 15 years), click Create, then paste both values below."
-  echo ""
-  SSL_CERT_PEM=$(read_pem "Origin Certificate")
-  echo ""
-  SSL_KEY_PEM=$(read_pem "Private Key")
-  echo ""
-  if [[ -z "$SSL_CERT_PEM" || -z "$SSL_KEY_PEM" ]]; then
-    error "Certificate or private key is empty. Cannot continue."
-    exit 1
+if ! $EXTERNAL_PROXY; then
+  header "SSL certificate method"
+  info "Choose how to obtain your SSL certificate:"
+  echo -e "  ${BOLD}1${RESET}) HTTP-01 challenge (default — port 80 reachable, no CDN proxy)"
+  echo -e "  ${BOLD}2${RESET}) Cloudflare Origin Certificate (paste cert + key — easiest for Cloudflare)"
+  echo -e "  ${BOLD}3${RESET}) Cloudflare DNS-01 challenge (automated, needs API token)"
+  echo -e "  ${BOLD}4${RESET}) Skip — I already have certificates or will set them up manually"
+
+  SSL_METHOD="${CACHED_SSL_METHOD:-1}"
+  prompt SSL_METHOD "SSL method [1/2/3/4]" "$SSL_METHOD"
+  # Normalize
+  case "$SSL_METHOD" in
+    2|origin|cf|cloudflare) SSL_METHOD=2 ;;
+    3|dns|dns-01)           SSL_METHOD=3 ;;
+    4|skip|manual|none)     SSL_METHOD=4 ;;
+    *)                      SSL_METHOD=1 ;;
+  esac
+
+  if [[ "$SSL_METHOD" == "2" ]]; then
+    echo ""
+    info "Go to Cloudflare Dashboard → your domain → SSL/TLS → Origin Server → Create Certificate"
+    info "Keep defaults (RSA, 15 years), click Create, then paste both values below."
+    echo ""
+    SSL_CERT_PEM=$(read_pem "Origin Certificate")
+    echo ""
+    SSL_KEY_PEM=$(read_pem "Private Key")
+    echo ""
+    if [[ -z "$SSL_CERT_PEM" || -z "$SSL_KEY_PEM" ]]; then
+      error "Certificate or private key is empty. Cannot continue."
+      exit 1
+    fi
+    success "Certificate and key received."
+    info "Remember to set Cloudflare SSL/TLS mode to 'Full (strict)' after setup."
   fi
-  success "Certificate and key received."
-  info "Remember to set Cloudflare SSL/TLS mode to 'Full (strict)' after setup."
-fi
 
-if [[ "$SSL_METHOD" == "3" ]]; then
-  info "You need a Cloudflare API token with Zone:DNS:Edit permission."
-  info "Create one at: https://dash.cloudflare.com/profile/api-tokens"
-  prompt CF_API_TOKEN "Cloudflare API token" "${CACHED_CF_API_TOKEN}"
-  while [[ -z "$CF_API_TOKEN" ]]; do
-    warn "API token is required for DNS-01 challenge."
-    prompt CF_API_TOKEN "Cloudflare API token" ""
-  done
+  if [[ "$SSL_METHOD" == "3" ]]; then
+    info "You need a Cloudflare API token with Zone:DNS:Edit permission."
+    info "Create one at: https://dash.cloudflare.com/profile/api-tokens"
+    prompt CF_API_TOKEN "Cloudflare API token" "${CACHED_CF_API_TOKEN}"
+    while [[ -z "$CF_API_TOKEN" ]]; do
+      warn "API token is required for DNS-01 challenge."
+      prompt CF_API_TOKEN "Cloudflare API token" ""
+    done
+  fi
 fi
 
 # Save inputs to cache for future re-runs
@@ -296,6 +306,7 @@ SMTP_PASS=${SMTP_PASS}
 SMTP_FROM=${SMTP_FROM}
 SSL_METHOD=${SSL_METHOD}
 CF_API_TOKEN=${CF_API_TOKEN}
+EXTERNAL_PROXY=${EXTERNAL_PROXY}
 EOF
 success "Settings cached to ${CACHE_FILE}."
 
@@ -730,6 +741,9 @@ success "Docker image fluxer-server:local built successfully."
 # ── Write .env ────────────────────────────────────────────────────────────────
 header "Writing .env…"
 
+FLUXER_HOST="127.0.0.1"
+$EXTERNAL_PROXY && FLUXER_HOST="0.0.0.0"
+
 cat > .env <<EOF
 # Generated by setup.sh — $(date -u '+%Y-%m-%d %H:%M:%S UTC')
 # Do NOT commit this file to version control.
@@ -740,6 +754,7 @@ LETSENCRYPT_EMAIL=${LE_EMAIL}
 # Local build — GHCR image is private (#10)
 FLUXER_IMAGE=fluxer-server:local
 FLUXER_PORT=8080
+FLUXER_HOST=${FLUXER_HOST}
 
 MEILI_MASTER_KEY=${MEILI_KEY}
 
@@ -949,7 +964,21 @@ fi
 
 # ── Write docker-compose.override.yml (NATS + certbot overrides) ─────────────
 header "Writing docker-compose.override.yml…"
-if [[ "$SSL_METHOD" == "3" ]]; then
+if $EXTERNAL_PROXY; then
+  CERTBOT_OVERRIDE=$(cat <<'CBEOF'
+
+  certbot:
+    profiles: ["disabled"]
+
+  nginx:
+    profiles: ["disabled"]
+
+  media-proxy:
+    ports:
+      - "0.0.0.0:8081:8081"
+CBEOF
+)
+elif [[ "$SSL_METHOD" == "3" ]]; then
   CERTBOT_OVERRIDE=$(cat <<'CBEOF'
 
   certbot:
@@ -1044,7 +1073,9 @@ success "Images pulled."
 # ── Obtain SSL certificate ────────────────────────────────────────────────────
 PROJECT_NAME=$(basename "$(pwd)")
 
-if [[ "$SSL_METHOD" == "1" ]]; then
+if $EXTERNAL_PROXY; then
+  info "External proxy mode — skipping SSL certificate setup."
+elif [[ "$SSL_METHOD" == "1" ]]; then
   header "Obtaining SSL certificate for ${DOMAIN} (HTTP-01)…"
   info "Starting nginx temporarily for ACME HTTP challenge…"
 
@@ -1142,14 +1173,16 @@ $COMPOSE $PROFILES down --remove-orphans 2>/dev/null || true
 docker stop fluxer_nginx_acme 2>/dev/null || true
 docker rm   fluxer_nginx_acme 2>/dev/null || true
 
-for port in 80 443; do
-  if ss -tlnH "sport = :${port}" 2>/dev/null | grep -q .; then
-    warn "Port ${port} is still in use. Attempting to free it…"
-    # Find and kill the docker-proxy holding the port
-    PID=$(ss -tlnpH "sport = :${port}" 2>/dev/null | grep -oP 'pid=\K[0-9]+' | head -1)
-    if [[ -n "$PID" ]]; then kill "$PID" 2>/dev/null || true; sleep 1; fi
-  fi
-done
+if ! $EXTERNAL_PROXY; then
+  for port in 80 443; do
+    if ss -tlnH "sport = :${port}" 2>/dev/null | grep -q .; then
+      warn "Port ${port} is still in use. Attempting to free it…"
+      # Find and kill the docker-proxy holding the port
+      PID=$(ss -tlnpH "sport = :${port}" 2>/dev/null | grep -oP 'pid=\K[0-9]+' | head -1)
+      if [[ -n "$PID" ]]; then kill "$PID" 2>/dev/null || true; sleep 1; fi
+    fi
+  done
+fi
 
 if $ENABLE_VOICE; then
   if command -v ufw &>/dev/null; then
@@ -1221,6 +1254,37 @@ fi
 
 if [[ "$VAPID_PUBLIC" == "REPLACE_VAPID_PUBLIC_KEY" ]]; then
   warn "VAPID keys not generated (no Node.js). Web push won't work until added."
+  echo ""
+fi
+
+if $EXTERNAL_PROXY; then
+  header "External proxy — add this vhost to your centralized nginx:"
+  echo -e "  ${BOLD}Upstream ports on this VM:${RESET}"
+  echo -e "    ${CYAN}8080${RESET}  Fluxer main app (HTTP, WebSocket)"
+  echo -e "    ${CYAN}8081${RESET}  Media proxy / Caddy (Content-Length fix — must NOT bypass)"
+  if $ENABLE_VOICE; then
+    echo -e "    ${CYAN}7880${RESET}  LiveKit signaling (WebSocket, strip /livekit/ prefix)"
+  fi
+  echo ""
+  echo -e "  ${BOLD}nginx vhost rules (replace THIS_VM_IP and YOUR_DOMAIN):${RESET}"
+  echo -e "    location /media/   → proxy_pass http://THIS_VM_IP:8081;   (300s timeout)"
+  if $ENABLE_VOICE; then
+    echo -e "    location /livekit/ → rewrite ^/livekit/(.*) /\$1 break;"
+    echo -e "                         proxy_pass http://THIS_VM_IP:7880;  (WebSocket, 86400s)"
+  fi
+  echo -e "    location /         → proxy_pass http://THIS_VM_IP:8080;   (WebSocket, 86400s)"
+  echo -e ""
+  echo -e "  ${BOLD}Required on all locations:${RESET}"
+  echo -e "    proxy_http_version 1.1;"
+  echo -e "    proxy_set_header Host \$host;"
+  echo -e "    proxy_set_header X-Real-IP \$remote_addr;"
+  echo -e "    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;"
+  echo -e "    proxy_set_header X-Forwarded-Proto \$scheme;"
+  echo -e "  ${BOLD}WebSocket locations (/, /livekit/) also need:${RESET}"
+  echo -e "    proxy_set_header Upgrade \$http_upgrade;"
+  echo -e "    proxy_set_header Connection \"upgrade\";"
+  echo -e "  ${BOLD}Top-level server block:${RESET}"
+  echo -e "    client_max_body_size 100M;"
   echo ""
 fi
 
