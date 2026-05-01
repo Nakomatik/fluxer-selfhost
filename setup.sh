@@ -641,12 +641,12 @@ else
   warn "libfluxcore Cargo.toml not found — skipping."
 fi
 
-# #24: moxcms 0.8.1 const-eval crash on wasm32
+# #24: moxcms ≥0.8.0 const-eval crash on wasm32 (0.8.1 fails on rustc 1.93, 0.8.0 fails on rustc 1.85)
 info "Adding moxcms downgrade (#24)…"
 
 if ! grep -q 'cargo update.*moxcms' "$DOCKERFILE"; then
   sed -i '/cd fluxer_app && pnpm lingui:compile && pnpm build/i\
-RUN cd /usr/src/app/fluxer_app/crates/libfluxcore 2>/dev/null && (cargo update -p moxcms --precise 0.8.0 2>/dev/null || cargo update -p moxcms --precise 0.7.11 2>/dev/null || true)' "$DOCKERFILE"
+RUN cd /usr/src/app/fluxer_app/crates/libfluxcore 2>/dev/null && (cargo update -p moxcms --precise 0.7.11 2>/dev/null || true)' "$DOCKERFILE"
   success "moxcms downgrade step added to Dockerfile."
 else
   info "moxcms downgrade already present — skipping."
